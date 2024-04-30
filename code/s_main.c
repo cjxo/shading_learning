@@ -31,8 +31,34 @@ enum {
 	OSInput_Flag_Quit = (1 << 0),
 };
 
+typedef u16 OS_Input_Interact_Flags;
+enum {
+	OSInput_Interact_Pressed = (1 << 1),
+	OSInput_Interact_Released = (1 << 2),
+	OSInput_Interact_Held = (1 << 3),
+};
+
+typedef u16 OS_Input_Key;
+enum {
+	OSInput_Key_Shift,
+	OSInput_Key_Space,
+	OSInput_Key_Escape,
+	OSInput_Key_W,
+	OSInput_Key_A,
+	OSInput_Key_S,
+	OSInput_Key_D,
+	OSInput_Key_Up,
+	OSInput_Key_Down,
+	OSInput_Key_Left,
+	OSInput_Key_Right,
+	OSInput_Key_Count,
+};
+
 typedef struct {
 	OS_Input_Flags flags;
+	OS_Input_Interact_Flags key_input[OSInput_Key_Count];
+
+	s32 mouse_displace_x, mouse_displace_y;
 } OS_Input;
 
 function s32
@@ -95,7 +121,7 @@ w32_window_proc(HWND window, UINT message,
 				os_window->resized_this_frame = False;
 			}
 		} break;
-        
+	
 		case WM_DESTROY: {
 			PostQuitMessage(0);
 		} break;
@@ -108,8 +134,69 @@ w32_window_proc(HWND window, UINT message,
 	return(result);
 }
 
+function OS_Input_Key
+w32_map_wparam_to_input_key(WPARAM wparam) {
+	OS_Input_Key result;
+
+	switch (wparam) {
+		case VK_SHIFT: {
+			result = OSInput_Key_Shift;
+		} break;
+
+		case VK_SPACE: {
+			result = OSInput_Key_Space;
+		} break;
+
+		case VK_ESCAPE: {
+			result = OSInput_Key_Escape;
+		} break;
+
+		case 'W': {
+			result = OSInput_Key_W;
+		} break;
+		
+		case 'A': {
+			result = OSInput_Key_A;
+		} break;
+
+		case 'S': {
+			result = OSInput_Key_S;
+		} break;
+		
+		case 'D': {
+			result = OSInput_Key_D;
+		} break;
+
+		case VK_UP: {
+			result = OSInput_Key_Up;
+		} break;
+		
+		case VK_DOWN: {
+			result = OSInput_Key_Down;
+		} break;
+		
+		case VK_LEFT: {
+			result = OSInput_Key_Left;
+		} break;
+
+		case VK_RIGHT: {
+			result = OSInput_Key_Right;
+		} break;
+		
+		default: {
+			result = OSInput_Key_Count;
+		} break;
+	}
+
+	return(result);
+}
+
 function void
 os_fill_events(OS_Input *input, OS_Window *window) {
+	for (u64 key_index = 0; key_index < array_count(input->key_input); ++key_index) {
+		input->key_input[key_index] &= ~(OSInput_Interact_Pressed | OSInput_Interact_Released);
+	}
+
 	window->resized_this_frame = False;
 	SetWindowLongPtrA(window->handle, GWLP_USERDATA, (LONG_PTR)window);
     
@@ -119,6 +206,21 @@ os_fill_events(OS_Input *input, OS_Window *window) {
 			case WM_QUIT: {
 				input->flags |= OSInput_Flag_Quit;
 			} break;
+			
+			case WM_KEYDOWN: {
+				OS_Input_Key key = w32_map_wparam_to_input_key(message.wParam);
+				if (key != OSInput_Key_Count) {
+					input->key_input[key] |= (OSInput_Interact_Pressed | OSInput_Interact_Held);
+				}
+			} break;
+			
+			case WM_KEYUP: {
+				OS_Input_Key key = w32_map_wparam_to_input_key(message.wParam);
+				if (key != OSInput_Key_Count) {
+					input->key_input[key] |= (OSInput_Interact_Released);
+					input->key_input[key] &= ~(OSInput_Interact_Held);
+				}
+			} break;
             
 			default: {
 				TranslateMessage(&message);
@@ -126,6 +228,39 @@ os_fill_events(OS_Input *input, OS_Window *window) {
 			} break;
 		}
 	}
+
+	POINT cursor_p;
+	GetCursorPos(&cursor_p);
+	ScreenToClient(window->handle, &cursor_p);
+
+	input->mouse_displace_x = cursor_p.x - (window->client_width / 2);
+	input->mouse_displace_y = cursor_p.y - (window->client_height / 2);
+
+	POINT new_cursor;
+	new_cursor.x = window->client_width / 2;
+	new_cursor.y = window->client_height / 2;
+	ClientToScreen(window->handle, &new_cursor);
+	SetCursorPos(new_cursor.x, new_cursor.y);
+
+	SetCursor(null);
+}
+
+function b32
+os_input_pressed(OS_Input *input, OS_Input_Key key) {
+	b32 result = (input->key_input[key] & OSInput_Interact_Pressed) != 0;
+	return(result);
+}
+
+function b32
+os_input_released(OS_Input *input, OS_Input_Key key) {
+	b32 result = (input->key_input[key] & OSInput_Interact_Released) != 0;
+	return(result);
+}
+
+function b32
+os_input_held(OS_Input *input, OS_Input_Key key) {
+	b32 result = (input->key_input[key] & OSInput_Interact_Held) != 0;
+	return(result);
 }
 
 typedef struct {
@@ -145,6 +280,7 @@ typedef struct {
 
 __declspec(align(16)) typedef struct {
 	m44 perspective;
+	m44 world_to_camera;
 } D3D11_Constants;
 
 typedef struct {
@@ -372,7 +508,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 		d3d11_initialize(&d3d11_state, &os_window);
         
 		ID3D11VertexShader *my_vertex_shader = null;
-		ID3D11PixelShader *my_pixel_shader = null;
+		ID3D11PixelShader *my_gooch_pixel_shader = null;
 		ID3D11InputLayout *per_vertex_input_layout = null;
 		ID3D11Buffer *cube_vertex_buffer = null;
 		ID3D11Buffer *constant_buffer = null;
@@ -386,60 +522,61 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 													HEAP_ZERO_MEMORY,
 													model_instance_capacity * sizeof(Model_Instance));
         
+			// Vertices <-> Normal
 		f32 cube_model_vertices[] = {
-			// FRONT
-			-0.5f, -0.5f, -0.5f,
-			-0.5f,  0.5f, -0.5f,
-            0.5f,  0.5f, -0.5f,
+			// FRONT			
+			-0.5f, -0.5f, -0.5f, 	0.0f, 0.0f, -1.0f,
+			-0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
+             0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
             
-            0.5f,  0.5f, -0.5f,
-            0.5f, -0.5f, -0.5f,
-			-0.5f, -0.5f, -0.5f,
+             0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
+             0.5f, -0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
+			-0.5f, -0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
             
 			// LEFT
-			-0.5f, -0.5f,  0.5f,
-			-0.5f,  0.5f,  0.5f,
-			-0.5f,  0.5f, -0.5f,
+			-0.5f, -0.5f,  0.5f,	-1.0f, 0.0f, 0.0f,
+			-0.5f,  0.5f,  0.5f,	-1.0f, 0.0f, 0.0f,
+			-0.5f,  0.5f, -0.5f,	-1.0f, 0.0f, 0.0f,
             
-			-0.5f,  0.5f, -0.5f,
-			-0.5f, -0.5f, -0.5f,
-			-0.5f, -0.5f,  0.5f,
+			-0.5f,  0.5f, -0.5f,	-1.0f, 0.0f, 0.0f,
+			-0.5f, -0.5f, -0.5f,	-1.0f, 0.0f, 0.0f,
+			-0.5f, -0.5f,  0.5f,	-1.0f, 0.0f, 0.0f,
             
 			// BACK
-            0.5f, -0.5f,  0.5f,
-            0.5f,  0.5f,  0.5f,
-			-0.5f,  0.5f,  0.5f,
+            0.5f, -0.5f,  0.5f,		0.0f, 0.0f, 1.0f,
+             0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
+			-0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
             
-			-0.5f,  0.5f,  0.5f,
-			-0.5f, -0.5f,  0.5f,
-            0.5f, -0.5f,  0.5f,
+			-0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
+			-0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
+             0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
             
 			// RIGHT
-            0.5f, -0.5f, -0.5f,
-            0.5f,  0.5f, -0.5f,
-            0.5f,  0.5f,  0.5f,
+            0.5f, -0.5f, -0.5f,		1.0f, 0.0f, 0.0f,
+            0.5f,  0.5f, -0.5f,		1.0f, 0.0f, 0.0f,
+            0.5f,  0.5f,  0.5f,		1.0f, 0.0f, 0.0f,
             
-            0.5f,  0.5f,  0.5f,
-            0.5f, -0.5f,  0.5f,
-            0.5f, -0.5f, -0.5f,
+            0.5f,  0.5f,  0.5f,		1.0f, 0.0f, 0.0f,
+            0.5f, -0.5f,  0.5f,		1.0f, 0.0f, 0.0f,
+            0.5f, -0.5f, -0.5f,		1.0f, 0.0f, 0.0f,
             
 			// Top
-			-0.5f,  0.5f, -0.5f,
-			-0.5f,  0.5f,  0.5f,
-            0.5f,  0.5f,  0.5f,
+			-0.5f,  0.5f, -0.5f,	0.0f, 1.0f, 0.0f,
+			-0.5f,  0.5f,  0.5f,	0.0f, 1.0f, 0.0f,
+            0.5f,  0.5f,  0.5f,		0.0f, 1.0f, 0.0f,
             
-            0.5f,  0.5f,  0.5f,
-            0.5f,  0.5f, -0.5f,
-			-0.5f,  0.5f, -0.5f,
+            0.5f,  0.5f,  0.5f,		0.0f, 1.0f, 0.0f,
+            0.5f,  0.5f, -0.5f,		0.0f, 1.0f, 0.0f,
+			-0.5f,  0.5f, -0.5f,	0.0f, 1.0f, 0.0f,
             
 			// Bottom
-			-0.5f, -0.5f,  0.5f,
-			-0.5f, -0.5f, -0.5f,
-            0.5f, -0.5f, -0.5f,
+			-0.5f, -0.5f,  0.5f,	0.0f, -1.0f, 0.0f,
+			-0.5f, -0.5f, -0.5f,	0.0f, -1.0f, 0.0f,
+            0.5f, -0.5f, -0.5f,		0.0f, -1.0f, 0.0f,
             
-            0.5f, -0.5f, -0.5f,
-            0.5f, -0.5f,  0.5f,
-			-0.5f, -0.5f,  0.5f,
+            0.5f, -0.5f, -0.5f,		0.0f, -1.0f, 0.0f,
+            0.5f, -0.5f,  0.5f,		0.0f, -1.0f, 0.0f,
+			-0.5f, -0.5f,  0.5f,	0.0f, -1.0f, 0.0f,
 		};
         
 		{
@@ -453,7 +590,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			
 			D3D11_SUBRESOURCE_DATA cube_mesh_data = { 0 };
 			cube_mesh_data.pSysMem = cube_model_vertices;
-			cube_mesh_data.SysMemPitch = sizeof(f32) * 3;
+			cube_mesh_data.SysMemPitch = sizeof(f32) * 6;
             
 			HRESULT h_result =  ID3D11Device1_CreateBuffer(d3d11_state.main_device, &cube_mesh_desc,
 														   &cube_mesh_data, &cube_vertex_buffer);
@@ -465,23 +602,27 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			const char hlsl_code[] =
 				"#line " stringify(__LINE__) "\n"
 				"cbuffer Constants : register(b0) {\n"
-				"	float4x4 perspective;"
+				"	float4x4 perspective;\n"
+				"	float4x4 world_to_camera;\n"
 				"};\n"
 				"\n"
 				"struct Per_Vertex {\n"
-				"	float3 vertex : Vertex;"
+				"	float3 vertex : Vertex;\n"
+				"	// this normal is allowed to not be unit. The vertex shader will normalize this.\n"
+				"	float3 normal : Normal;\n"
 				"};\n"
 				"\n"
 				"struct Model_Per_Instance {\n"
 				"	float3 w_p : World_Position;\n"
 				"	float4 orient : Quat_Orient;\n"
-				"	float3 scale : Scale;"
+				"	float3 scale : Scale;\n"
 				"	float4 colour : Colour;\n"
 				"};\n"
 				"\n"
 				"struct VS_Out {\n"
 				"	float4 pos : SV_Position;\n"
 				"	float4 colour : Colour;\n"
+				"	float3 normal : Normal;\n"
 				"};\n"
 				"\n"
 				"StructuredBuffer<Model_Per_Instance> model_instances : register(t0);\n"
@@ -490,7 +631,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				"	float4 result;\n"
 				"	result.x = a.x * b.x - dot(a.yzw, b.yzw);\n"
 				"	result.yzw = b.yzw * a.x + a.yzw * b.x + cross(a.yzw, b.yzw);\n"
-				"	return result;"
+				"	return result;\n"
 				"}\n"
 				"\n"
 				"float4 quat_conj(float4 a) {\n"
@@ -508,13 +649,15 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				"VS_Out vs_main(Per_Vertex vertex, uint iid : SV_InstanceID) {\n"
 				"	Model_Per_Instance instance = model_instances[iid];\n"
 				"	float3 vert = quat_rot_v3f(instance.orient, vertex.vertex) * instance.scale;\n"
+				"	vert += instance.w_p;\n"
+				"	vert = mul(world_to_camera, float4(vert, 1.0f)).xyz;\n"
 				"	VS_Out output = (VS_Out)0;\n"
-				"	output.pos = mul(perspective, float4(vert + instance.w_p, 1.0f));\n"
+				"	output.pos = mul(perspective, float4(vert, 1.0f));\n"
 				"	output.colour = instance.colour;\n"
 				"	return(output);\n"
 				"}\n"
 				"\n"
-				"float4 ps_main(VS_Out vs) : SV_Target {\n"
+				"float4 ps_gooch_main(VS_Out vs) : SV_Target {\n"
 				"	return float4(pow(vs.colour.xyz, 2.2f), vs.colour.w);\n"
 				"}\n"
 				;
@@ -546,7 +689,8 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			}
             
 			D3D11_INPUT_ELEMENT_DESC per_vertex_ia[] = {
-				{ "Vertex", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+				{ "Vertex", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+				{ "Normal", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 }
 			};
             
 			h_result = ID3D11Device1_CreateInputLayout(d3d11_state.main_device, per_vertex_ia, 
@@ -560,7 +704,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			ID3D10Blob_Release(d3d_bytecode);
             
 			h_result = D3DCompile(hlsl_code, sizeof(hlsl_code), null, null,
-								  D3D_COMPILE_STANDARD_FILE_INCLUDE, "ps_main", "ps_5_0",
+								  D3D_COMPILE_STANDARD_FILE_INCLUDE, "ps_gooch_main", "ps_5_0",
 								  D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION |
 								  D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS |
 								  D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
@@ -572,7 +716,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			}
             
 			h_result = ID3D11Device1_CreatePixelShader(d3d11_state.main_device, ID3D10Blob_GetBufferPointer(d3d_bytecode),
-													   ID3D10Blob_GetBufferSize(d3d_bytecode), null, &my_pixel_shader);
+													   ID3D10Blob_GetBufferSize(d3d_bytecode), null, &my_gooch_pixel_shader);
             
 			if (h_result != S_OK) {
 				os_message_box(str8("Error"), str8("Failed to create Pixel Shader"));
@@ -629,11 +773,107 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				ExitProcess(1);
 			}
 		}
-        
+       
+		// Ok, so rotations in R^3 (esp. camera)
+		// We discuss Euler Angles, namely, pitch, yaw, and roll.
+		// Euler angles are a mechanism for creating a rotation through a sequence
+		// of three simpler rotations called pitch, yaw, and roll. 
+		// Pitching rotates an object around the x-axis.
+		// 	- pointing up or down (yes guesture)
+		// Yawing rotates an object around the xz-plane or around the y-axis.
+		// 	- turning left or right (no guesture)
+		// Rolling rotates an object around the xy-plane or around the z-axis.
+		//	- tilting your head left and right.
+		//
+		//	Rotation matrices are orthonormal. Thus its inverse is its transpose.
+		//
+		//	We now derive the camera basis. We use pitch and yaw and radius r (sphere coords).
+		//	1. Suppose you're at the origin. Look straight ahead towards the x-axis.
+		//	2. The y-axis points from your feet to your head. Point your right-arm up the y-axis.
+		//	3. Rotate your body counterclockwise by the angle yaw (azimuth).
+		//	4. Rotate your right-arm downward by angle pitch (zenith)
+		//	5. Displace by the distance r.
+		//	Now we convert from sphere coords to cartesian coords.
+		v3f camera_p = v3f_make(0.0f, 0.0f, 0.0f);
+		f32 camera_theta = 90.0f; // nod yes; Rotate around x.
+		f32 camera_phi = 90.0f; // no; rotate around y
+	
+		{
+			POINT new_cursor;
+			new_cursor.x = os_window.client_width / 2;
+			new_cursor.y = os_window.client_height / 2;
+			ClientToScreen(os_window.handle, &new_cursor);
+			SetCursorPos(new_cursor.x, new_cursor.y);
+		}
+
 		f32 rot_accum = 0.0f;
 		while (!(os_input.flags & OSInput_Flag_Quit)) {
 			os_fill_events(&os_input, &os_window);
+
+			if (os_input_released(&os_input, OSInput_Key_Escape)) {
+				os_input.flags |= OSInput_Flag_Quit;
+			}
+
+			f32 mouse_sensitivity = 0.1f;
+			camera_theta += os_input.mouse_displace_y * mouse_sensitivity;
+			camera_phi -= os_input.mouse_displace_x * mouse_sensitivity;
 			
+			if (camera_theta > 145.0f) {
+				camera_theta = 145.0f;
+			} else if (camera_theta < 45.0f) {
+				camera_theta = 45.0f;
+			}
+
+			if (camera_phi >= 360.0f) {
+				camera_phi = 0.0f;
+			} else if (camera_phi <= -360.0f) {
+				camera_phi = 0.0f;
+			}
+
+			f32 theta = radians(camera_theta);
+			f32 phi = radians(camera_phi);
+			f32 cosine_theta = cosf(theta);
+			f32 cosine_phi = cosf(phi);
+			f32 sine_theta = sinf(theta);
+			f32 sine_phi = sinf(phi);
+
+			v3f camera_forward;
+			camera_forward.x = cosine_phi * sine_theta;
+			camera_forward.y = cosine_theta;
+			camera_forward.z = sine_theta * sine_phi;
+			v3f_norm(&camera_forward);
+
+			v3f temp_up = v3f_make(0.0f, 1.0f, 0.0f);
+			v3f camera_right = v3f_cross(temp_up, camera_forward);
+			v3f_norm(&camera_right);
+			v3f camera_up = v3f_cross(camera_forward, camera_right);
+			v3f_norm(&camera_up);
+
+			f32 move_speed = 0.1f;
+			if (os_input_held(&os_input, OSInput_Key_W)) {
+				camera_p = v3f_add(v3f_scale(camera_forward, move_speed), camera_p);
+			}
+			
+			if (os_input_held(&os_input, OSInput_Key_S)) {
+				camera_p = v3f_sub(camera_p, v3f_scale(camera_forward, move_speed));
+			}
+			
+			if (os_input_held(&os_input, OSInput_Key_A)) {
+				camera_p = v3f_sub(camera_p, v3f_scale(camera_right, move_speed));
+			}
+			
+			if (os_input_held(&os_input, OSInput_Key_D)) {
+				camera_p = v3f_add(camera_p, v3f_scale(camera_right, move_speed));
+			}
+
+			if (os_input_held(&os_input, OSInput_Key_Shift)) {
+				camera_p = v3f_sub(camera_p, v3f_scale(camera_up, move_speed));
+			}
+			
+			if (os_input_held(&os_input, OSInput_Key_Space)) {
+				camera_p = v3f_add(camera_p, v3f_scale(camera_up, move_speed));
+			}
+
 			D3D11_VIEWPORT viewport;
 			viewport.Width = (f32)os_window.client_width;
 			viewport.Height = (f32)os_window.client_height;
@@ -643,9 +883,9 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			viewport.TopLeftY = 0;
 			
 			Model_Instance *model = model_instances + model_instance_count++;
-            //			quat x = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 0.0f, 0.0f));
-            //			quat y = quat_make_rotate_around_axis(rot_accum * 2.0f, v3f_make(0.0f, 1.0f, 0.0f));
-            //			quat z = quat_make_rotate_around_axis(-rot_accum * 0.5f, v3f_make(0.0f, 0.0f, 1.0f));
+            //quat x = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 0.0f, 0.0f));
+            //quat y = quat_make_rotate_around_axis(rot_accum * 2.0f, v3f_make(0.0f, 1.0f, 0.0f));
+            //quat z = quat_make_rotate_around_axis(-rot_accum * 0.5f, v3f_make(0.0f, 0.0f, 1.0f));
             
 			quat r = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 1.0f, 1.0f));
 			
@@ -658,12 +898,21 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             
 			D3D11_MAPPED_SUBRESOURCE mapped_subresource;
 			switch (ID3D11DeviceContext_Map(d3d11_state.base_device_context,
-											(ID3D11Resource *)constant_buffer, 0, D3D11_MAP_WRITE_DISCARD,
-											0, &mapped_subresource)) {
+                                                    (ID3D11Resource *)constant_buffer, 0, D3D11_MAP_WRITE_DISCARD,
+                                                    0, &mapped_subresource)) {
 				case S_OK: {
 					f32 aspect = viewport.Height / viewport.Width;
-					m44 pers = m44_perspective_lh_z01(radians(66.2f), aspect, 1.0f, 100.0f);
-					*((m44 *)mapped_subresource.pData) = pers;
+                    m44 pers = m44_perspective_lh_z01(radians(66.2f), aspect, 1.0f, 100.0f);
+                    D3D11_Constants *constants = ((D3D11_Constants *)mapped_subresource.pData);
+
+					constants->perspective = pers;
+					constants->world_to_camera.rows[0] = v4f_make(camera_right.x, camera_up.x, camera_forward.x, 0.0f);
+					constants->world_to_camera.rows[1] = v4f_make(camera_right.y, camera_up.y, camera_forward.y, 0.0f);
+					constants->world_to_camera.rows[2] = v4f_make(camera_right.z, camera_up.z, camera_forward.z, 0.0f);
+					constants->world_to_camera.rows[3].x = -v3f_dot(camera_right, camera_p);
+					constants->world_to_camera.rows[3].y = -v3f_dot(camera_up, camera_p);
+					constants->world_to_camera.rows[3].z = -v3f_dot(camera_forward, camera_p);
+					constants->world_to_camera.rows[3].w = 1; 
                     
 					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)constant_buffer, 0);
 				} break;
@@ -689,7 +938,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			ID3D11DeviceContext_IASetPrimitiveTopology(d3d11_state.base_device_context,
                                                        D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             
-			UINT stride = 3 * sizeof(f32);
+			UINT stride = 6 * sizeof(f32);
 			UINT offsets = 0;
 			ID3D11DeviceContext_IASetVertexBuffers(d3d11_state.base_device_context, 0, 1,
 												   &cube_vertex_buffer, &stride, &offsets);
@@ -711,7 +960,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 										   (ID3D11RasterizerState *)d3d11_state.wire_nocull_raster);
             
 			ID3D11DeviceContext_PSSetShader(d3d11_state.base_device_context,
-											my_pixel_shader,
+											my_gooch_pixel_shader,
 											null, 0);
             
 			ID3D11DeviceContext_OMSetDepthStencilState(d3d11_state.base_device_context,
@@ -731,6 +980,6 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			model_instance_count = 0;
 		}
 	}
-	
+
 	ExitProcess(0);
 }

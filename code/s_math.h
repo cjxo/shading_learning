@@ -19,6 +19,10 @@ typedef union {
         f32 r, g, b, a;
     };
 	struct {
+		v3f xyz;
+		f32 __unused_a;
+	};
+	struct {
 		f32 real;
 		v3f imaginary;
 	};
@@ -36,6 +40,8 @@ typedef union {
 
 typedef v4f quat;
 
+#define pi_f32 3.14159f
+#define pi_half_f32 (pi_f32*0.5f)
 function f32 radians(f32 x);
 
 // V3s
