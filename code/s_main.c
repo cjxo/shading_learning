@@ -24,6 +24,7 @@ typedef struct {
 	u32 client_height;
 	b32 resized_this_frame;
 	HWND handle;
+    b32 is_focus;
 } OS_Window;
 
 typedef u8 OS_Input_Flags;
@@ -121,6 +122,18 @@ w32_window_proc(HWND window, UINT message,
 				os_window->resized_this_frame = False;
 			}
 		} break;
+
+        case WM_KILLFOCUS: {
+            if (os_window) {
+                os_window->is_focus = False;
+            }
+        } break;
+
+        case WM_SETFOCUS: {
+            if (os_window) {
+                os_window->is_focus = True;
+            }
+        } break;
 	
 		case WM_DESTROY: {
 			PostQuitMessage(0);
@@ -229,20 +242,22 @@ os_fill_events(OS_Input *input, OS_Window *window) {
 		}
 	}
 
-	POINT cursor_p;
-	GetCursorPos(&cursor_p);
-	ScreenToClient(window->handle, &cursor_p);
+    if (window->is_focus) {
+        POINT cursor_p;
+        GetCursorPos(&cursor_p);
+        ScreenToClient(window->handle, &cursor_p);
 
-	input->mouse_displace_x = cursor_p.x - (window->client_width / 2);
-	input->mouse_displace_y = cursor_p.y - (window->client_height / 2);
+        input->mouse_displace_x = cursor_p.x - (window->client_width / 2);
+        input->mouse_displace_y = cursor_p.y - (window->client_height / 2);
 
-	POINT new_cursor;
-	new_cursor.x = window->client_width / 2;
-	new_cursor.y = window->client_height / 2;
-	ClientToScreen(window->handle, &new_cursor);
-	SetCursorPos(new_cursor.x, new_cursor.y);
+        POINT new_cursor;
+        new_cursor.x = window->client_width / 2;
+        new_cursor.y = window->client_height / 2;
+        ClientToScreen(window->handle, &new_cursor);
+        SetCursorPos(new_cursor.x, new_cursor.y);
 
-	SetCursor(null);
+        SetCursor(null);
+    }
 }
 
 function b32
@@ -278,9 +293,30 @@ typedef struct {
 	ID3D11DepthStencilState *depth_buffer_state;
 } D3D11_State;
 
+enum {
+    LightType_Point,
+    LightType_Spotlight,
+    LightType_Count
+};
+
+typedef struct {
+    u32 type;
+    v3f p;
+
+    f32 reference_distance;
+    f32 max_distance;
+    f32 min_distance;
+    f32 __unused_a;
+
+    v4f colour;
+} Light;
+
 __declspec(align(16)) typedef struct {
 	m44 perspective;
 	m44 world_to_camera;
+    v3f camera_p;
+    f32 __unused_a;
+    Light light;
 } D3D11_Constants;
 
 typedef struct {
@@ -445,6 +481,14 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
 		ExitProcess(1);
 	}
     
+	raster_desc1.CullMode = D3D11_CULL_BACK;
+    result = ID3D11Device1_CreateRasterizerState1(d3d11_state->main_device, &raster_desc1,
+												  &(d3d11_state->wire_cull_raster));
+	if (result != S_OK) {
+		// LOG and CRASH
+		ExitProcess(1);
+	}
+
 	D3D11_TEXTURE2D_DESC depth_buffer_desc;
 	ID3D11Texture2D_GetDesc(d3d11_state->back_buffer, &depth_buffer_desc);
 	depth_buffer_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -503,12 +547,14 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 	if (RegisterClassA(&window_class)) {
 		OS_Window os_window = os_create_window(str8("RTR"), 1280, 720);
 		OS_Input os_input = { 0 };
+        os_window.is_focus = True;
 		
 		D3D11_State d3d11_state;
 		d3d11_initialize(&d3d11_state, &os_window);
         
 		ID3D11VertexShader *my_vertex_shader = null;
 		ID3D11PixelShader *my_gooch_pixel_shader = null;
+		ID3D11PixelShader *my_test_pixel_shader = null;
 		ID3D11InputLayout *per_vertex_input_layout = null;
 		ID3D11Buffer *cube_vertex_buffer = null;
 		ID3D11Buffer *constant_buffer = null;
@@ -598,14 +644,41 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			if (h_result != S_OK) {
 				ExitProcess(0);
 			}
-            
+
+            // Some shading models model light in a binary way. That is, what the object looks like
+            // in the presence of light or in the absence of (or unaffected by) light. Thus, we need criteria for
+            // distinguishing two cases. That is, distance from light sources, shadowing, surface facing away from light, etc.
+            //
+            // Mathematically speaking, let g be a function of unlit surface, f be a function of lit surface, n be the surface normal,
+            // v be the vector to the eye, l be the vector to the light, and c be the shade result. Then,
+            // c = g(n, v) + f(l, n, v).
+    
 			const char hlsl_code[] =
 				"#line " stringify(__LINE__) "\n"
+                "#define LightType_Point 0\n"
+                "#define LightType_Spotlight 1\n"
+                "#define Total_Lights 8\n"
+                "struct Light {\n"
+                "   uint type : Light_Type;\n" // 4
+                "   float3 p : Position_Or_Direction;\n" // 12
+                "   // ------ 16 ------ \n"
+                "   float reference_distance : Reference_Distance;\n"
+                "   float max_distance : Max_Distance;\n"
+                "   float min_distance : Min_Distance;\n"
+                "   float __unused_a;\n"
+                "   // ------ 16 ------ \n"
+                "   float4 colour : Colour;\n"
+                "   // ------ 16 ------ \n"
+                "};\n"
+                "\n"
 				"cbuffer Constants : register(b0) {\n"
 				"	float4x4 perspective;\n"
 				"	float4x4 world_to_camera;\n"
-				"};\n"
-				"\n"
+                "   float3 camera_p;\n"
+                "   float __unused_a;\n"
+                "   Light light;\n"
+				"};\n" 
+                "\n"
 				"struct Per_Vertex {\n"
 				"	float3 vertex : Vertex;\n"
 				"	// this normal is allowed to not be unit. The vertex shader will normalize this.\n"
@@ -621,6 +694,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				"\n"
 				"struct VS_Out {\n"
 				"	float4 pos : SV_Position;\n"
+                "   float3 pos_world : World_Pos;\n"
 				"	float4 colour : Colour;\n"
 				"	float3 normal : Normal;\n"
 				"};\n"
@@ -647,19 +721,69 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				"}\n"
 				"\n"
 				"VS_Out vs_main(Per_Vertex vertex, uint iid : SV_InstanceID) {\n"
+				"	VS_Out output = (VS_Out)0;\n"
 				"	Model_Per_Instance instance = model_instances[iid];\n"
 				"	float3 vert = quat_rot_v3f(instance.orient, vertex.vertex) * instance.scale;\n"
 				"	vert += instance.w_p;\n"
+                "   output.pos_world = vert;\n"
 				"	vert = mul(world_to_camera, float4(vert, 1.0f)).xyz;\n"
-				"	VS_Out output = (VS_Out)0;\n"
 				"	output.pos = mul(perspective, float4(vert, 1.0f));\n"
 				"	output.colour = instance.colour;\n"
+                "\n"
+                "   float3 normal = quat_rot_v3f(instance.orient, vertex.normal) * instance.scale;\n"
+                "   output.normal = normalize(normal);\n"
 				"	return(output);\n"
 				"}\n"
 				"\n"
 				"float4 ps_gooch_main(VS_Out vs) : SV_Target {\n"
-				"	return float4(pow(vs.colour.xyz, 2.2f), vs.colour.w);\n"
+                "   float3 light_p = float3(4.0f, 0.0f, 0.0f);\n"
+                "   float3 gooch_cool = float3(0.0f, 0.0f, 0.55f) + 0.25f * vs.colour.xyz;\n"
+                "   float3 gooch_warm = float3(0.3f, 0.3f, 0.0f) + 0.25f * vs.colour.xyz;\n"
+                "   float3 gooch_highlight = float3(1.0f, 1.0f, 1.0f);\n"
+                "\n"
+                "   float3 to_eye = normalize(camera_p - vs.pos_world);\n"
+                "   float3 to_light = normalize(light_p - vs.pos_world);\n"
+                "   float t = (dot(to_light, vs.normal) + 1.0f) * 0.5f;\n"
+                "   float3 r = normalize(2.0f * dot(vs.normal, to_light) * vs.normal - to_light);\n"
+                "   float s = clamp(100.0f * dot(r, to_eye) - 97.0f, 0.0f, 1.0f);\n"
+                "\n"
+                "   float3 shaded = s * gooch_highlight + (1.0f - s) * (t * gooch_warm + (1.0f - t) * gooch_cool);\n"
+				"	return float4(pow(shaded, 2.2f), vs.colour.w);\n"
 				"}\n"
+                "\n"
+                "float windowing(float r, float rmax) {\n"
+                "   float result = pow(max(1.0f - pow(r / rmax, 4.0f), 0.0f), 2.0f);\n"
+                "   return(result);\n"
+                "}\n"
+                "\n"
+                "float spotlight(float3 light_dir, float3 spot_dir, float inner_circle_angle, float max_angle) {\n"
+                "   float c = dot(spot_dir, light_dir);\n"
+                "   float result = clamp((c - cos(max_angle)) / (cos(inner_circle_angle) - cos(max_angle)), 0.0f, 1.0f);\n"
+                "   return(result * result);\n"
+                "   //return result * result * (3.0f - 2.0f * result);\n"
+                "}\n"
+                "\n"
+                "float4 ps_test_shading_model(VS_Out vs) : SV_Target {\n"
+                "   // so point light?\n"
+                "   float3 light_colour = float3(0.5f, 0.3f, 1.0f);\n"
+                "   float3 unlit_colour = 0.05f * vs.colour.xyz;\n"
+                "   float3 lit_colour = vs.colour.xyz;\n"
+                "\n"
+                "   float3 to_light = light.p - vs.pos_world;\n"
+                "   float distance_to_light = length(to_light);\n"
+                "   to_light /= distance_to_light;\n"
+                "   float cosine = max(dot(to_light, vs.normal), 0.0f);\n"
+                "\n"
+                "   float r0 = 8.0f;\n"
+                "   // unreal engine's attenuation\n"
+                "   //float attenuation = ((r0 * r0) / (1.0f + distance_to_light * distance_to_light));\n"
+                "   // CryEngine's attenuation\n"
+                "   float attenuation = pow(r0 / max(distance_to_light, 1.0f), 2.0f) * windowing(distance_to_light, 50.0f);\n"
+                "   //float attenuation = windowing(distance_to_light, 50.0f);\n"
+                "   float3 shaded = unlit_colour + cosine * light_colour * attenuation * lit_colour * spotlight(-to_light, float3(0.0f, 0.0f, 1.0f), radians(5.0f), radians(35.0f));\n"
+				"	return float4(pow(shaded, 2.2f), vs.colour.w);\n"
+                "}\n"
+
 				;
             
 			OutputDebugStringA(hlsl_code);
@@ -715,8 +839,32 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				ExitProcess(1);
 			}
             
+            // The idea of Gooch Shading is to compare the surface normal to the light's location. If the normal points towards the light,
+            // a warmer tone is used for the surface. Else if it points away, a cooler tone is used. Angles in between interpolate between these tones.
 			h_result = ID3D11Device1_CreatePixelShader(d3d11_state.main_device, ID3D10Blob_GetBufferPointer(d3d_bytecode),
 													   ID3D10Blob_GetBufferSize(d3d_bytecode), null, &my_gooch_pixel_shader);
+            
+			if (h_result != S_OK) {
+				os_message_box(str8("Error"), str8("Failed to create Pixel Shader"));
+				ExitProcess(1);
+			}
+            
+			ID3D10Blob_Release(d3d_bytecode);
+
+            h_result = D3DCompile(hlsl_code, sizeof(hlsl_code), null, null,
+								  D3D_COMPILE_STANDARD_FILE_INCLUDE, "ps_test_shading_model", "ps_5_0",
+								  D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION |
+								  D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS |
+								  D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+								  &d3d_bytecode, &d3d_error);
+            
+			if (h_result != S_OK) {
+				os_message_box(str8("Pixel Shader Compilation Error"), str8_make(ID3D10Blob_GetBufferPointer(d3d_error), ID3D10Blob_GetBufferSize(d3d_error)));
+				ExitProcess(1);
+			}
+
+            h_result = ID3D11Device1_CreatePixelShader(d3d11_state.main_device, ID3D10Blob_GetBufferPointer(d3d_bytecode),
+													   ID3D10Blob_GetBufferSize(d3d_bytecode), null, &my_test_pixel_shader);
             
 			if (h_result != S_OK) {
 				os_message_box(str8("Error"), str8("Failed to create Pixel Shader"));
@@ -887,13 +1035,19 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             //quat y = quat_make_rotate_around_axis(rot_accum * 2.0f, v3f_make(0.0f, 1.0f, 0.0f));
             //quat z = quat_make_rotate_around_axis(-rot_accum * 0.5f, v3f_make(0.0f, 0.0f, 1.0f));
             
-			quat r = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 1.0f, 1.0f));
+			quat r = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 0.0f, 1.0f));
 			
-			model->position = v3f_make(-1.0f, 0.0f, 3.5f);
-			model->orient = r;
-			model->scale = v3f_make(1.0f, 1.0f, 1.0f);
+			model->position = v3f_make(0.0f, 0.0f, 10.5f);
+			model->orient = quat_make(1.0f, 0.0f, 0.0f, 0.0f);
+            //model->orient = r;
+			model->scale = v3f_make(8.0f, 8.0f, 8.0f);
 			model->colour = v4f_make(1.0f, 1.0f, 0.0f, 1.0f);
             
+            model = model_instances + model_instance_count++;
+            model->position = v3f_make(2.0f, 0.0f, -3.5f);
+			model->orient = r;
+			model->scale = v3f_make(1.0f, 1.0f, 1.0f);
+			model->colour = v4f_make(0.0f, 0.5f, 0.8f, 1.0f);
 			rot_accum += 0.01f;
             
 			D3D11_MAPPED_SUBRESOURCE mapped_subresource;
@@ -913,7 +1067,16 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 					constants->world_to_camera.rows[3].y = -v3f_dot(camera_up, camera_p);
 					constants->world_to_camera.rows[3].z = -v3f_dot(camera_forward, camera_p);
 					constants->world_to_camera.rows[3].w = 1; 
-                    
+                    constants->camera_p = camera_p;
+
+                    Light *light = &(constants->light);
+                    light->type = LightType_Point;
+                    //light->p = v3f_make(0.0f, 0.0f, -1.0f);
+                    light->p = v3f_make(0.0f, 0.0f, -1.0f);
+                    light->reference_distance = 3.0f;
+                    light->min_distance = 1.0f;
+                    light->max_distance = 50.0f;
+                    light->colour = v4f_make(0.5f, 0.3f, 1.0f, 1.0f);
 					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)constant_buffer, 0);
 				} break;
 			}
@@ -957,10 +1120,10 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             
 			ID3D11DeviceContext_RSSetViewports(d3d11_state.base_device_context, 1, &viewport);
 			ID3D11DeviceContext_RSSetState(d3d11_state.base_device_context,
-										   (ID3D11RasterizerState *)d3d11_state.wire_nocull_raster);
+										   (ID3D11RasterizerState *)d3d11_state.fill_cull_raster);
             
 			ID3D11DeviceContext_PSSetShader(d3d11_state.base_device_context,
-											my_gooch_pixel_shader,
+											my_test_pixel_shader,
 											null, 0);
             
 			ID3D11DeviceContext_OMSetDepthStencilState(d3d11_state.base_device_context,
