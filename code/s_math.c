@@ -84,6 +84,14 @@ quat_make(f32 s, f32 i, f32 j, f32 k) {
 }
 
 function quat
+quat_identity(void) {
+    quat result;
+    result.real = 1.0f;
+    result.i = result.j = result.j = 0.0f;
+    return(result);
+}
+
+function quat
 quat_add(quat a, quat b) {
 	quat result;
 	result.real = a.real + b.real;

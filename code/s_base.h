@@ -43,6 +43,8 @@ enum {
 #define s_assert(cond,msg)
 #endif
 
+#define assert_true(c) s_assert((c)==True)
+
 typedef struct {
 	u8 *str;
 	u64 char_count;

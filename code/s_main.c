@@ -284,6 +284,8 @@ typedef struct {
 	ID3D11DeviceContext *base_device_context;
 	IDXGISwapChain1 *swap_chain;
 	ID3D11Texture2D *back_buffer;
+    ID3D11Texture2D *offscreen_back_buffer;
+    ID3D11RenderTargetView *offscreen_back_buffer_rtv;
 	ID3D11RenderTargetView *back_buffer_as_rtv;
 	ID3D11RasterizerState1 *fill_cull_raster;
 	ID3D11RasterizerState1 *wire_nocull_raster;
@@ -294,19 +296,27 @@ typedef struct {
 } D3D11_State;
 
 enum {
+    LightType_Directional,
     LightType_Point,
     LightType_Spotlight,
     LightType_Count
 };
 
 typedef struct {
-    u32 type;
     v3f p;
+    u32 type;
 
     f32 reference_distance;
     f32 max_distance;
     f32 min_distance;
     f32 __unused_a;
+
+    v3f direction;
+    u32 enabled;
+
+    f32 inner_angle;
+    f32 max_angle;
+    f32 __unused_c[2];
 
     v4f colour;
 } Light;
@@ -316,8 +326,17 @@ __declspec(align(16)) typedef struct {
 	m44 world_to_camera;
     v3f camera_p;
     f32 __unused_a;
-    Light light;
 } D3D11_Constants;
+
+__declspec(align(16)) typedef struct {
+    Light light[8];
+    v3f camera_p;
+    f32 __unused_a;
+} Light_Constants;
+
+typedef struct {
+    v4f colour;
+} Material;
 
 typedef struct {
 	v3f position;
@@ -325,6 +344,9 @@ typedef struct {
 	v3f scale;
 	v4f colour;
 } Model_Instance;
+
+#define multisample_count 4
+#define multisample_quality 0
 
 function void
 d3d11_create_swap_chain(D3D11_State *state, OS_Window *os_window) {
@@ -402,6 +424,36 @@ d3d11_create_swap_chain(D3D11_State *state, OS_Window *os_window) {
 		ExitProcess(0);
 	}
     
+    D3D11_TEXTURE2D_DESC backbuffer_desc = { 0 };
+    ID3D11Texture2D_GetDesc(state->back_buffer, &backbuffer_desc);
+    D3D11_TEXTURE2D_DESC multisampled_offscreen_desc = {0};
+    multisampled_offscreen_desc.Width = swap_chain_desc1.Width;
+    multisampled_offscreen_desc.Height = swap_chain_desc1.Height;
+    multisampled_offscreen_desc.MipLevels = 1;
+    multisampled_offscreen_desc.ArraySize = 1;
+    multisampled_offscreen_desc.Format = backbuffer_desc.Format;
+
+    // https://learn.microsoft.com/en-us/windows/win32/api/dxgicommon/ns-dxgicommon-dxgi_sample_desc
+    multisampled_offscreen_desc.SampleDesc.Count = multisample_count;
+    multisampled_offscreen_desc.SampleDesc.Quality = multisample_quality;
+    multisampled_offscreen_desc.Usage = D3D11_USAGE_DEFAULT;
+    multisampled_offscreen_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    multisampled_offscreen_desc.CPUAccessFlags = 0;
+    result = ID3D11Device1_CreateTexture2D(state->main_device, &multisampled_offscreen_desc, null, &(state->offscreen_back_buffer));
+    if (result != S_OK) {
+		// TODO(christian): Log
+		ExitProcess(0);
+	}
+    
+    D3D11_RENDER_TARGET_VIEW_DESC offscreen_back_buffer_view_desc = { 0 };
+    offscreen_back_buffer_view_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    offscreen_back_buffer_view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+    result = ID3D11Device1_CreateRenderTargetView(state->main_device, (ID3D11Resource *)state->offscreen_back_buffer,
+                                                  &offscreen_back_buffer_view_desc, &(state->offscreen_back_buffer_rtv));
+    if (result != S_OK) {
+		// TODO(christian): Log
+		ExitProcess(0);
+	}
 	IDXGIDevice_Release(dxgi_device);
 	IDXGIAdapter_Release(dxgi_adapter);
 	IDXGIFactory2_Release(dxgi_factory);
@@ -448,32 +500,32 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
 	D3D11_RASTERIZER_DESC1 raster_desc1 = { 0 };
 	raster_desc1.AntialiasedLineEnable = FALSE;
 	raster_desc1.CullMode = D3D11_CULL_BACK;
-	raster_desc1.DepthBias = 0;
-	raster_desc1.DepthBiasClamp = 0.0f;
+	raster_desc1.DepthBias = D3D11_DEFAULT_DEPTH_BIAS;
+	raster_desc1.DepthBiasClamp = D3D11_DEFAULT_DEPTH_BIAS_CLAMP;
 	raster_desc1.DepthClipEnable = TRUE;
 	raster_desc1.FillMode = D3D11_FILL_SOLID;
 	raster_desc1.ForcedSampleCount = 0;
 	raster_desc1.FrontCounterClockwise = FALSE;
-	raster_desc1.MultisampleEnable = FALSE;
+	raster_desc1.MultisampleEnable = TRUE;
 	raster_desc1.ScissorEnable = FALSE;
-	raster_desc1.SlopeScaledDepthBias  = 0;
+	raster_desc1.SlopeScaledDepthBias  = D3D11_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
 	result = ID3D11Device1_CreateRasterizerState1(d3d11_state->main_device, &raster_desc1, &(d3d11_state->fill_cull_raster));
 	if (result != S_OK) {
 		// LOG and CRASH
 		ExitProcess(1);
 	}
 	
-	raster_desc1.AntialiasedLineEnable = FALSE;
+	raster_desc1.AntialiasedLineEnable = TRUE;
 	raster_desc1.CullMode = D3D11_CULL_NONE;
-	raster_desc1.DepthBias = 0;
-	raster_desc1.DepthBiasClamp = 0.0f;
+	raster_desc1.DepthBias = D3D11_DEFAULT_DEPTH_BIAS;
+	raster_desc1.DepthBiasClamp = D3D11_DEFAULT_DEPTH_BIAS_CLAMP;
 	raster_desc1.DepthClipEnable = TRUE;
 	raster_desc1.FillMode = D3D11_FILL_WIREFRAME;
 	raster_desc1.ForcedSampleCount = 0;
 	raster_desc1.FrontCounterClockwise = FALSE;
 	raster_desc1.MultisampleEnable = FALSE;
 	raster_desc1.ScissorEnable = FALSE;
-	raster_desc1.SlopeScaledDepthBias  = 0;
+	raster_desc1.SlopeScaledDepthBias  = D3D11_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
 	result = ID3D11Device1_CreateRasterizerState1(d3d11_state->main_device, &raster_desc1,
 												  &(d3d11_state->wire_nocull_raster));
 	if (result != S_OK) {
@@ -493,6 +545,8 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
 	ID3D11Texture2D_GetDesc(d3d11_state->back_buffer, &depth_buffer_desc);
 	depth_buffer_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 	depth_buffer_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    depth_buffer_desc.SampleDesc.Count = multisample_count;
+    depth_buffer_desc.SampleDesc.Quality = multisample_quality;
     
 	result = ID3D11Device1_CreateTexture2D(d3d11_state->main_device, &depth_buffer_desc,
 										   null, &(d3d11_state->depth_buffer_texture));
@@ -502,6 +556,9 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
 		ExitProcess(1);
 	}
     
+    D3D11_DEPTH_STENCIL_VIEW_DESC depth_buffer_view_desc = { 0 };
+    depth_buffer_view_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    depth_buffer_view_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
 	result = ID3D11Device1_CreateDepthStencilView(d3d11_state->main_device,
 												  (ID3D11Resource *)d3d11_state->depth_buffer_texture,
 												  null, &(d3d11_state->depth_buffer_view));
@@ -524,6 +581,44 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
 	}
 }
 
+typedef struct {
+    Model_Instance *instances;
+    u64 capacity;
+    u64 count;
+} R3D_Buffer;
+
+function void
+r3d_init(R3D_Buffer *buffer, u64 capacity) {
+    buffer->count = 0;
+    buffer->capacity = capacity;
+    buffer->instances = HeapAlloc(GetProcessHeap(),
+                                  HEAP_GENERATE_EXCEPTIONS |
+                                  HEAP_ZERO_MEMORY,
+                                  capacity * sizeof(Model_Instance));
+}
+
+function Model_Instance *
+r3d_acquire(R3D_Buffer *buffer) {
+    s_assert(buffer->count < buffer->capacity, "Must be less than capacity");
+
+    Model_Instance *result = buffer->instances + buffer->count++;
+    return(result);
+}
+
+function Model_Instance *
+r3d_add_instance(R3D_Buffer *buffer, v3f p, quat orient, v3f scale, v4f colour) {
+    Model_Instance *model = r3d_acquire(buffer);
+    model->position = p;
+    model->orient = orient;
+    model->scale = scale;
+    model->colour = colour;
+    return(model);
+}
+
+// https://en.wikipedia.org/wiki/Anti-aliasing
+// https://en.wikipedia.org/wiki/Multisample_anti-aliasing
+// https://en.wikipedia.org/wiki/Supersampling
+// https://github.com/microsoft/DirectXTK/wiki/Line-drawing-and-anti-aliasing
 int WINAPI
 WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         PSTR lpCmdLine, int nCmdShow) {
@@ -552,22 +647,19 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 		D3D11_State d3d11_state;
 		d3d11_initialize(&d3d11_state, &os_window);
         
+        R3D_Buffer r3d_buffer;
+        r3d_init(&r3d_buffer, 1024);
+        
 		ID3D11VertexShader *my_vertex_shader = null;
 		ID3D11PixelShader *my_gooch_pixel_shader = null;
 		ID3D11PixelShader *my_test_pixel_shader = null;
 		ID3D11InputLayout *per_vertex_input_layout = null;
 		ID3D11Buffer *cube_vertex_buffer = null;
 		ID3D11Buffer *constant_buffer = null;
+		ID3D11Buffer *light_constant_buffer = null;
 		ID3D11Buffer *model_instance_buffer = null;
 		ID3D11ShaderResourceView *model_instance_srv = null;
-        
-		u64 model_instance_count = 0;
-		u64 model_instance_capacity = 1024;
-		Model_Instance *model_instances = HeapAlloc(GetProcessHeap(),
-													HEAP_GENERATE_EXCEPTIONS |
-													HEAP_ZERO_MEMORY,
-													model_instance_capacity * sizeof(Model_Instance));
-        
+         
 			// Vertices <-> Normal
 		f32 cube_model_vertices[] = {
 			// FRONT			
@@ -655,20 +747,27 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     
 			const char hlsl_code[] =
 				"#line " stringify(__LINE__) "\n"
-                "#define LightType_Point 0\n"
-                "#define LightType_Spotlight 1\n"
+                "#define LightType_Directional 0\n"
+                "#define LightType_Point 1\n"
+                "#define LightType_Spotlight 2\n"
                 "#define Total_Lights 8\n"
                 "struct Light {\n"
+                "   float3 p : Position;\n" // 12
                 "   uint type : Light_Type;\n" // 4
-                "   float3 p : Position_Or_Direction;\n" // 12
                 "   // ------ 16 ------ \n"
-                "   float reference_distance : Reference_Distance;\n"
-                "   float max_distance : Max_Distance;\n"
-                "   float min_distance : Min_Distance;\n"
-                "   float __unused_a;\n"
+                "   float reference_distance : Reference_Distance;\n" // 4
+                "   float max_distance : Max_Distance;\n" // 4 
+                "   float min_distance : Min_Distance;\n" // 4
+                "   float __unused_a;\n" // 4
                 "   // ------ 16 ------ \n"
-                "   float4 colour : Colour;\n"
+                "   float3 direction : Direction;\n" // 12
+                "   uint enabled;\n" // 4
                 "   // ------ 16 ------ \n"
+                "   float inner_angle : InnerAngle;\n"
+                "   float max_angle : MaxAngle;\n"
+                "   float2 __unused_c;\n"
+                "   // ------ 16 ------ \n"
+                "   float4 colour : Colour;\n" // 16
                 "};\n"
                 "\n"
 				"cbuffer Constants : register(b0) {\n"
@@ -676,8 +775,13 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				"	float4x4 world_to_camera;\n"
                 "   float3 camera_p;\n"
                 "   float __unused_a;\n"
-                "   Light light;\n"
-				"};\n" 
+				"};\n"
+                "\n"
+                "cbuffer Light_Constants : register(b1) {\n"
+                "   Light lights[Total_Lights];\n"
+                "   float3 lcamera_p;\n"
+                "   float __unused_b;\n"
+                "};\n"
                 "\n"
 				"struct Per_Vertex {\n"
 				"	float3 vertex : Vertex;\n"
@@ -759,28 +863,46 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 "float spotlight(float3 light_dir, float3 spot_dir, float inner_circle_angle, float max_angle) {\n"
                 "   float c = dot(spot_dir, light_dir);\n"
                 "   float result = clamp((c - cos(max_angle)) / (cos(inner_circle_angle) - cos(max_angle)), 0.0f, 1.0f);\n"
-                "   return(result * result);\n"
-                "   //return result * result * (3.0f - 2.0f * result);\n"
+                "   //return(result * result);\n"
+                "   return result * result * (3.0f - 2.0f * result);\n"
                 "}\n"
                 "\n"
                 "float4 ps_test_shading_model(VS_Out vs) : SV_Target {\n"
-                "   // so point light?\n"
-                "   float3 light_colour = float3(0.5f, 0.3f, 1.0f);\n"
                 "   float3 unlit_colour = 0.05f * vs.colour.xyz;\n"
                 "   float3 lit_colour = vs.colour.xyz;\n"
                 "\n"
-                "   float3 to_light = light.p - vs.pos_world;\n"
-                "   float distance_to_light = length(to_light);\n"
-                "   to_light /= distance_to_light;\n"
-                "   float cosine = max(dot(to_light, vs.normal), 0.0f);\n"
+                "   float3 shaded = (float3)0;\n"
+                "   for (uint light_idx = 0; light_idx < Total_Lights; ++light_idx) {\n"
+                "       Light light = lights[light_idx];\n"
+                "       if (!light.enabled) continue;\n"
+                "       float3 light_colour = light.colour.xyz;\n"
                 "\n"
-                "   float r0 = 8.0f;\n"
-                "   // unreal engine's attenuation\n"
-                "   //float attenuation = ((r0 * r0) / (1.0f + distance_to_light * distance_to_light));\n"
-                "   // CryEngine's attenuation\n"
-                "   float attenuation = pow(r0 / max(distance_to_light, 1.0f), 2.0f) * windowing(distance_to_light, 50.0f);\n"
-                "   //float attenuation = windowing(distance_to_light, 50.0f);\n"
-                "   float3 shaded = unlit_colour + cosine * light_colour * attenuation * lit_colour * spotlight(-to_light, float3(0.0f, 0.0f, 1.0f), radians(5.0f), radians(35.0f));\n"
+                "       if (light.type == LightType_Directional) {\n"
+                "           float cosine = max(dot(-light.direction, vs.normal), 0.0f);\n"
+                "           shaded += cosine * light_colour * lit_colour;\n"
+                "       } else {\n"
+                "           float3 to_light = light.p - vs.pos_world;\n"
+                "           float distance_to_light = length(to_light);\n"
+                "           to_light /= distance_to_light;\n"
+                "\n"
+                "           // unreal engine's attenuation\n"
+                "           //float attenuation = ((r0 * r0) / (1.0f + distance_to_light * distance_to_light));\n"
+                "           //CryEngine's attenuation\n"
+                "           float wnd = windowing(distance_to_light, light.max_distance);\n"
+                "           float attenuation = pow(light.reference_distance / max(distance_to_light, light.min_distance), 2.0f) * wnd;\n"
+                "           //float attenuation = windowing(distance_to_light, 50.0f);\n"
+                "           float cosine = max(dot(to_light, vs.normal), 0.0f);\n"
+                "           if (light.type == LightType_Point) {\n"
+                "               shaded += cosine * light_colour * lit_colour * attenuation;\n"
+                "           } else {\n"
+                "               shaded += cosine * light_colour * lit_colour * attenuation * spotlight(-to_light, normalize(light.direction), radians(light.inner_angle), radians(light.max_angle));\n"
+                "           }\n"
+                "       }\n"
+                "       shaded = saturate(shaded);\n"
+                "   }\n"
+                "   shaded += unlit_colour;\n"
+                "\n"
+                "\n" 
 				"	return float4(pow(shaded, 2.2f), vs.colour.w);\n"
                 "}\n"
 
@@ -876,7 +998,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         
 		{
 			D3D11_BUFFER_DESC model_instance_desc = { 0 };
-			model_instance_desc.ByteWidth = (UINT)(model_instance_capacity * sizeof(Model_Instance));
+			model_instance_desc.ByteWidth = (UINT)(r3d_buffer.capacity * sizeof(Model_Instance));
 			model_instance_desc.Usage = D3D11_USAGE_DYNAMIC;
             model_instance_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
             model_instance_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -894,7 +1016,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			D3D11_SHADER_RESOURCE_VIEW_DESC model_instance_srv_desc = { 0 };
 			model_instance_srv_desc.Format = DXGI_FORMAT_UNKNOWN;
 			model_instance_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
-			model_instance_srv_desc.Buffer.NumElements = (UINT)model_instance_capacity;
+			model_instance_srv_desc.Buffer.NumElements = (UINT)r3d_buffer.capacity;
 			model_instance_srv_desc.Buffer.ElementWidth = sizeof(Model_Instance);
 			h_result = ID3D11Device1_CreateShaderResourceView(d3d11_state.main_device,
 															  (ID3D11Resource *)model_instance_buffer,
@@ -916,6 +1038,20 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 														  &constant_desc, null,
                                                           &constant_buffer);
             
+			if (h_result != S_OK) {
+				os_message_box(str8("Error"), str8("Failed to create Constant Buffer"));
+				ExitProcess(1);
+			}
+
+            //
+            constant_desc.ByteWidth = sizeof(Light_Constants);
+			constant_desc.Usage = D3D11_USAGE_DYNAMIC;
+			constant_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			constant_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			h_result = ID3D11Device1_CreateBuffer(d3d11_state.main_device,
+                                                  &constant_desc, null,
+                                                  &light_constant_buffer);
+    
 			if (h_result != S_OK) {
 				os_message_box(str8("Error"), str8("Failed to create Constant Buffer"));
 				ExitProcess(1);
@@ -954,6 +1090,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			SetCursorPos(new_cursor.x, new_cursor.y);
 		}
 
+        f32 game_dt_step = 1.0f / 60.0f;
 		f32 rot_accum = 0.0f;
 		while (!(os_input.flags & OSInput_Flag_Quit)) {
 			os_fill_events(&os_input, &os_window);
@@ -1030,25 +1167,20 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			viewport.TopLeftX = 0;
 			viewport.TopLeftY = 0;
 			
-			Model_Instance *model = model_instances + model_instance_count++;
+            r3d_add_instance(&r3d_buffer, v3f_make(0.0f, 0.0f, 8.0f),
+                             quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 0.0f, 0.0f)),
+                             v3f_make(6.0f, 6.0f, 6.0f),
+                             v4f_make(0.0f, 0.5f, 0.8f, 1.0f));
+            
+            r3d_add_instance(&r3d_buffer, v3f_make(6.0f, 0.0f, 4.0f),
+                             quat_make_rotate_around_axis(rot_accum * -1.0f, v3f_make(0.0f, 0.5f, 1.0f)),
+                             v3f_make(1.0f, 1.0f, 1.0f),
+                             v4f_make(0.6f, 0.5f, 0.0f, 1.0f));
             //quat x = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 0.0f, 0.0f));
             //quat y = quat_make_rotate_around_axis(rot_accum * 2.0f, v3f_make(0.0f, 1.0f, 0.0f));
             //quat z = quat_make_rotate_around_axis(-rot_accum * 0.5f, v3f_make(0.0f, 0.0f, 1.0f));
-            
-			quat r = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 0.0f, 1.0f));
-			
-			model->position = v3f_make(0.0f, 0.0f, 10.5f);
-			model->orient = quat_make(1.0f, 0.0f, 0.0f, 0.0f);
-            //model->orient = r;
-			model->scale = v3f_make(8.0f, 8.0f, 8.0f);
-			model->colour = v4f_make(1.0f, 1.0f, 0.0f, 1.0f);
-            
-            model = model_instances + model_instance_count++;
-            model->position = v3f_make(2.0f, 0.0f, -3.5f);
-			model->orient = r;
-			model->scale = v3f_make(1.0f, 1.0f, 1.0f);
-			model->colour = v4f_make(0.0f, 0.5f, 0.8f, 1.0f);
-			rot_accum += 0.01f;
+
+			rot_accum += game_dt_step;
             
 			D3D11_MAPPED_SUBRESOURCE mapped_subresource;
 			switch (ID3D11DeviceContext_Map(d3d11_state.base_device_context,
@@ -1066,33 +1198,67 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 					constants->world_to_camera.rows[3].x = -v3f_dot(camera_right, camera_p);
 					constants->world_to_camera.rows[3].y = -v3f_dot(camera_up, camera_p);
 					constants->world_to_camera.rows[3].z = -v3f_dot(camera_forward, camera_p);
-					constants->world_to_camera.rows[3].w = 1; 
+					constants->world_to_camera.rows[3].w = 1;
                     constants->camera_p = camera_p;
-
-                    Light *light = &(constants->light);
-                    light->type = LightType_Point;
-                    //light->p = v3f_make(0.0f, 0.0f, -1.0f);
-                    light->p = v3f_make(0.0f, 0.0f, -1.0f);
-                    light->reference_distance = 3.0f;
-                    light->min_distance = 1.0f;
-                    light->max_distance = 50.0f;
-                    light->colour = v4f_make(0.5f, 0.3f, 1.0f, 1.0f);
 					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)constant_buffer, 0);
 				} break;
 			}
+
+            switch (ID3D11DeviceContext_Map(d3d11_state.base_device_context,
+                                            (ID3D11Resource *)light_constant_buffer, 0, D3D11_MAP_WRITE_DISCARD,
+                                            0, &mapped_subresource)) {
+                case S_OK: {
+                    v3f size = v3f_make(0.2f, 0.2f, 0.2f);
+                    v4f colour = v4f_make(1.0f, 1.0f, 1.0f, 1.0f);
+
+                    Light_Constants *constants = (Light_Constants *)mapped_subresource.pData;
+                    Light light;
+                    light.type = LightType_Spotlight;
+                    light.p = v3f_make(0.0f, 0.0f, -1.0f);
+                    light.reference_distance = 8.0f;
+                    light.max_distance = 50.0f;
+                    light.min_distance = 1.0f;
+                    light.direction = v3f_make(0.0f, 0.0f, 1.0f);
+                    light.colour = v4f_make(0.5f, 0.3f, 1.0f, 1.0f);
+                    light.inner_angle = 15.0f;
+                    light.max_angle = 35.0f;
+                    light.enabled = True;
+                    constants->light[0] = light;
+                    r3d_add_instance(&r3d_buffer, light.p, quat_identity(), size, colour);
+
+                    light.p = v3f_make(16.0f, 4.0f, -4.0f);
+                    light.reference_distance = 24.0f;
+                    light.max_distance = 100.0f;
+                    light.direction = v3f_make(-1.0f, 0.0f, 1.0f);
+                    light.colour = v4f_make(1.0f, 1.0f, 1.0f, 1.0f);
+                    constants->light[1] = light;
+                    r3d_add_instance(&r3d_buffer, light.p, quat_identity(), size, colour);
+
+                    light.type = LightType_Point;
+                    light.p = v3f_make(sinf(rot_accum) * 10.0f, cosf(rot_accum) * 10.0f, 0.0f);
+                    light.reference_distance = 16.0f;
+                    light.max_distance = 100.0f;
+                    light.colour = v4f_make(0.0f, 1.0f, 0.0f, 1.0f);
+                    constants->light[2] = light;
+
+                    r3d_add_instance(&r3d_buffer, light.p, quat_identity(), size, colour);
+                    constants->camera_p = camera_p;
+					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)light_constant_buffer, 0);
+                } break;
+            }
 			
 			switch (ID3D11DeviceContext_Map(d3d11_state.base_device_context,
 											(ID3D11Resource *)model_instance_buffer, 0, D3D11_MAP_WRITE_DISCARD,
 											0, &mapped_subresource)) {
 				case S_OK: {
-					memory_copy(mapped_subresource.pData, model_instances, sizeof(Model_Instance) * model_instance_count);
+					memory_copy(mapped_subresource.pData, r3d_buffer.instances, sizeof(Model_Instance) * r3d_buffer.count);
 					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)model_instance_buffer, 0);
 				} break;
 			}
             
 			f32 colour[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 			ID3D11DeviceContext_ClearRenderTargetView(d3d11_state.base_device_context,
-													  d3d11_state.back_buffer_as_rtv,
+													  d3d11_state.offscreen_back_buffer_rtv,
 													  colour);
 			ID3D11DeviceContext_ClearDepthStencilView(d3d11_state.base_device_context,
 													  d3d11_state.depth_buffer_view,
@@ -1122,6 +1288,9 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			ID3D11DeviceContext_RSSetState(d3d11_state.base_device_context,
 										   (ID3D11RasterizerState *)d3d11_state.fill_cull_raster);
             
+            ID3D11DeviceContext_PSSetConstantBuffers(d3d11_state.base_device_context,
+                                                     1, 1, &light_constant_buffer);
+
 			ID3D11DeviceContext_PSSetShader(d3d11_state.base_device_context,
 											my_test_pixel_shader,
 											null, 0);
@@ -1130,17 +1299,24 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 													   d3d11_state.depth_buffer_state, 0);
             
 			ID3D11DeviceContext_OMSetRenderTargets(d3d11_state.base_device_context, 1,
-												   &(d3d11_state.back_buffer_as_rtv),
+												   &(d3d11_state.offscreen_back_buffer_rtv),
 												   d3d11_state.depth_buffer_view);
             
 			ID3D11DeviceContext_OMSetBlendState(d3d11_state.base_device_context,
 											    null, null, 0xffffffff);
-            
+
 			ID3D11DeviceContext_DrawInstanced(d3d11_state.base_device_context,
-											  36, (UINT)model_instance_count, 0, 0);
+											  36, (UINT)r3d_buffer.count, 0, 0);
+
+
+            D3D11_TEXTURE2D_DESC backbuffer_desc = { 0 };
+            ID3D11Texture2D_GetDesc(d3d11_state.back_buffer, &backbuffer_desc);
+            ID3D11DeviceContext_ResolveSubresource(d3d11_state.base_device_context, (ID3D11Resource *)d3d11_state.back_buffer, 0,
+                                                   (ID3D11Resource *)d3d11_state.offscreen_back_buffer, 0, 
+                                                   backbuffer_desc.Format);
             
 			IDXGISwapChain1_Present(d3d11_state.swap_chain, 1, 0);
-			model_instance_count = 0;
+			r3d_buffer.count = 0;
 		}
 	}
 

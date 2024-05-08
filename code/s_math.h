@@ -56,6 +56,7 @@ function void v3f_norm(v3f *a);
 // V4s
 function v4f v4f_make(f32 x, f32 y, f32 z, f32 w);
 function quat quat_make(f32 s, f32 i, f32 j, f32 k);
+function quat quat_identity(void);
 function quat quat_add(quat a, quat b);
 function quat quat_sub(quat a, quat b);
 function quat quat_conj(quat a);
