@@ -11,6 +11,7 @@
 #include <dxgi.h>
 #include <dxgi1_2.h>
 
+#include <float.h>
 #include <math.h>
 
 #include "s_base.h"
@@ -58,7 +59,7 @@ enum {
 typedef struct {
 	OS_Input_Flags flags;
 	OS_Input_Interact_Flags key_input[OSInput_Key_Count];
-
+    
 	s32 mouse_displace_x, mouse_displace_y;
 } OS_Input;
 
@@ -122,19 +123,19 @@ w32_window_proc(HWND window, UINT message,
 				os_window->resized_this_frame = False;
 			}
 		} break;
-
+        
         case WM_KILLFOCUS: {
             if (os_window) {
                 os_window->is_focus = False;
             }
         } break;
-
+        
         case WM_SETFOCUS: {
             if (os_window) {
                 os_window->is_focus = True;
             }
         } break;
-	
+        
 		case WM_DESTROY: {
 			PostQuitMessage(0);
 		} break;
@@ -150,20 +151,20 @@ w32_window_proc(HWND window, UINT message,
 function OS_Input_Key
 w32_map_wparam_to_input_key(WPARAM wparam) {
 	OS_Input_Key result;
-
+    
 	switch (wparam) {
 		case VK_SHIFT: {
 			result = OSInput_Key_Shift;
 		} break;
-
+        
 		case VK_SPACE: {
 			result = OSInput_Key_Space;
 		} break;
-
+        
 		case VK_ESCAPE: {
 			result = OSInput_Key_Escape;
 		} break;
-
+        
 		case 'W': {
 			result = OSInput_Key_W;
 		} break;
@@ -171,7 +172,7 @@ w32_map_wparam_to_input_key(WPARAM wparam) {
 		case 'A': {
 			result = OSInput_Key_A;
 		} break;
-
+        
 		case 'S': {
 			result = OSInput_Key_S;
 		} break;
@@ -179,7 +180,7 @@ w32_map_wparam_to_input_key(WPARAM wparam) {
 		case 'D': {
 			result = OSInput_Key_D;
 		} break;
-
+        
 		case VK_UP: {
 			result = OSInput_Key_Up;
 		} break;
@@ -191,7 +192,7 @@ w32_map_wparam_to_input_key(WPARAM wparam) {
 		case VK_LEFT: {
 			result = OSInput_Key_Left;
 		} break;
-
+        
 		case VK_RIGHT: {
 			result = OSInput_Key_Right;
 		} break;
@@ -200,7 +201,7 @@ w32_map_wparam_to_input_key(WPARAM wparam) {
 			result = OSInput_Key_Count;
 		} break;
 	}
-
+    
 	return(result);
 }
 
@@ -209,7 +210,7 @@ os_fill_events(OS_Input *input, OS_Window *window) {
 	for (u64 key_index = 0; key_index < array_count(input->key_input); ++key_index) {
 		input->key_input[key_index] &= ~(OSInput_Interact_Pressed | OSInput_Interact_Released);
 	}
-
+    
 	window->resized_this_frame = False;
 	SetWindowLongPtrA(window->handle, GWLP_USERDATA, (LONG_PTR)window);
     
@@ -241,21 +242,21 @@ os_fill_events(OS_Input *input, OS_Window *window) {
 			} break;
 		}
 	}
-
+    
     if (window->is_focus) {
         POINT cursor_p;
         GetCursorPos(&cursor_p);
         ScreenToClient(window->handle, &cursor_p);
-
+        
         input->mouse_displace_x = cursor_p.x - (window->client_width / 2);
         input->mouse_displace_y = cursor_p.y - (window->client_height / 2);
-
+        
         POINT new_cursor;
         new_cursor.x = window->client_width / 2;
         new_cursor.y = window->client_height / 2;
         ClientToScreen(window->handle, &new_cursor);
         SetCursorPos(new_cursor.x, new_cursor.y);
-
+        
         SetCursor(null);
     }
 }
@@ -286,6 +287,7 @@ typedef struct {
 	ID3D11Texture2D *back_buffer;
     ID3D11Texture2D *offscreen_back_buffer;
     ID3D11RenderTargetView *offscreen_back_buffer_rtv;
+    ID3D11ShaderResourceView *offscreen_back_buffer_srv;
 	ID3D11RenderTargetView *back_buffer_as_rtv;
 	ID3D11RasterizerState1 *fill_cull_raster;
 	ID3D11RasterizerState1 *wire_nocull_raster;
@@ -293,6 +295,9 @@ typedef struct {
 	ID3D11Texture2D *depth_buffer_texture;
 	ID3D11DepthStencilView *depth_buffer_view;
 	ID3D11DepthStencilState *depth_buffer_state;
+    
+    
+    ID3D11SamplerState *sampler_for_high_res_buffer;
 } D3D11_State;
 
 enum {
@@ -305,19 +310,19 @@ enum {
 typedef struct {
     v3f p;
     u32 type;
-
+    
     f32 reference_distance;
     f32 max_distance;
     f32 min_distance;
     f32 __unused_a;
-
+    
     v3f direction;
     u32 enabled;
-
+    
     f32 inner_angle;
     f32 max_angle;
     f32 __unused_c[2];
-
+    
     v4f colour;
 } Light;
 
@@ -346,7 +351,7 @@ typedef struct {
 } Model_Instance;
 
 #define multisample_count 4
-#define multisample_quality 0
+#define multisample_quality D3D11_STANDARD_MULTISAMPLE_PATTERN
 
 function void
 d3d11_create_swap_chain(D3D11_State *state, OS_Window *os_window) {
@@ -427,17 +432,17 @@ d3d11_create_swap_chain(D3D11_State *state, OS_Window *os_window) {
     D3D11_TEXTURE2D_DESC backbuffer_desc = { 0 };
     ID3D11Texture2D_GetDesc(state->back_buffer, &backbuffer_desc);
     D3D11_TEXTURE2D_DESC multisampled_offscreen_desc = {0};
-    multisampled_offscreen_desc.Width = swap_chain_desc1.Width;
-    multisampled_offscreen_desc.Height = swap_chain_desc1.Height;
+    multisampled_offscreen_desc.Width = swap_chain_desc1.Width * 2;
+    multisampled_offscreen_desc.Height = swap_chain_desc1.Height * 2;
     multisampled_offscreen_desc.MipLevels = 1;
     multisampled_offscreen_desc.ArraySize = 1;
     multisampled_offscreen_desc.Format = backbuffer_desc.Format;
-
+    
     // https://learn.microsoft.com/en-us/windows/win32/api/dxgicommon/ns-dxgicommon-dxgi_sample_desc
-    multisampled_offscreen_desc.SampleDesc.Count = multisample_count;
-    multisampled_offscreen_desc.SampleDesc.Quality = multisample_quality;
+    multisampled_offscreen_desc.SampleDesc.Count = 1;
+    multisampled_offscreen_desc.SampleDesc.Quality = 0;
     multisampled_offscreen_desc.Usage = D3D11_USAGE_DEFAULT;
-    multisampled_offscreen_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    multisampled_offscreen_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
     multisampled_offscreen_desc.CPUAccessFlags = 0;
     result = ID3D11Device1_CreateTexture2D(state->main_device, &multisampled_offscreen_desc, null, &(state->offscreen_back_buffer));
     if (result != S_OK) {
@@ -445,9 +450,22 @@ d3d11_create_swap_chain(D3D11_State *state, OS_Window *os_window) {
 		ExitProcess(0);
 	}
     
+    D3D11_SHADER_RESOURCE_VIEW_DESC offscreen_back_buffer_srv_desc = { 0 }; 
+    offscreen_back_buffer_srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    offscreen_back_buffer_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    offscreen_back_buffer_srv_desc.Texture2D.MipLevels = 1;
+    result = ID3D11Device1_CreateShaderResourceView(state->main_device,
+                                                    (ID3D11Resource *)state->offscreen_back_buffer,
+                                                    &offscreen_back_buffer_srv_desc,
+                                                    &state->offscreen_back_buffer_srv);
+    if (result != S_OK) {
+		// TODO(christian): Log
+		ExitProcess(0);
+	}
+    
     D3D11_RENDER_TARGET_VIEW_DESC offscreen_back_buffer_view_desc = { 0 };
     offscreen_back_buffer_view_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    offscreen_back_buffer_view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+    offscreen_back_buffer_view_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
     result = ID3D11Device1_CreateRenderTargetView(state->main_device, (ID3D11Resource *)state->offscreen_back_buffer,
                                                   &offscreen_back_buffer_view_desc, &(state->offscreen_back_buffer_rtv));
     if (result != S_OK) {
@@ -540,13 +558,15 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
 		// LOG and CRASH
 		ExitProcess(1);
 	}
-
+    
 	D3D11_TEXTURE2D_DESC depth_buffer_desc;
-	ID3D11Texture2D_GetDesc(d3d11_state->back_buffer, &depth_buffer_desc);
+	ID3D11Texture2D_GetDesc(d3d11_state->offscreen_back_buffer, &depth_buffer_desc);
 	depth_buffer_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 	depth_buffer_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    depth_buffer_desc.SampleDesc.Count = multisample_count;
-    depth_buffer_desc.SampleDesc.Quality = multisample_quality;
+    //depth_buffer_desc.SampleDesc.Count = multisample_count;
+    //depth_buffer_desc.SampleDesc.Quality = multisample_quality;
+    depth_buffer_desc.SampleDesc.Count = 1;
+    depth_buffer_desc.SampleDesc.Quality = 0;
     
 	result = ID3D11Device1_CreateTexture2D(d3d11_state->main_device, &depth_buffer_desc,
 										   null, &(d3d11_state->depth_buffer_texture));
@@ -558,10 +578,11 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
     
     D3D11_DEPTH_STENCIL_VIEW_DESC depth_buffer_view_desc = { 0 };
     depth_buffer_view_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-    depth_buffer_view_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
+    depth_buffer_view_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
 	result = ID3D11Device1_CreateDepthStencilView(d3d11_state->main_device,
 												  (ID3D11Resource *)d3d11_state->depth_buffer_texture,
 												  null, &(d3d11_state->depth_buffer_view));
+    
 	if (result != S_OK) {
 		// LOG and CRASH
 		ExitProcess(1);
@@ -579,6 +600,23 @@ d3d11_initialize(D3D11_State *d3d11_state, OS_Window *os_window) {
 		// LOG and CRASH
 		ExitProcess(1);
 	}
+    
+    D3D11_SAMPLER_DESC sampler_desc = { 0 };
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.MipLODBias = 0.0f;
+    sampler_desc.MaxAnisotropy = 1;
+    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampler_desc.BorderColor[0] = 1.0f;
+    sampler_desc.BorderColor[1] = 1.0f;
+    sampler_desc.BorderColor[2] = 1.0f;
+    sampler_desc.BorderColor[3] = 1.0f;
+    sampler_desc.MinLOD = -FLT_MAX;
+    sampler_desc.MaxLOD = FLT_MAX;
+    
+    ID3D11Device1_CreateSamplerState(d3d11_state->main_device, &sampler_desc, &d3d11_state->sampler_for_high_res_buffer);
 }
 
 typedef struct {
@@ -600,7 +638,7 @@ r3d_init(R3D_Buffer *buffer, u64 capacity) {
 function Model_Instance *
 r3d_acquire(R3D_Buffer *buffer) {
     s_assert(buffer->count < buffer->capacity, "Must be less than capacity");
-
+    
     Model_Instance *result = buffer->instances + buffer->count++;
     return(result);
 }
@@ -619,6 +657,10 @@ r3d_add_instance(R3D_Buffer *buffer, v3f p, quat orient, v3f scale, v4f colour) 
 // https://en.wikipedia.org/wiki/Multisample_anti-aliasing
 // https://en.wikipedia.org/wiki/Supersampling
 // https://github.com/microsoft/DirectXTK/wiki/Line-drawing-and-anti-aliasing
+// https://therealmjp.github.io/posts/msaa-overview/
+// https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-to-get-sample-position
+// https://assassin-plus.github.io/posts/Antialiasing/
+// TODO(christian): Implement supersampling..
 int WINAPI
 WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         PSTR lpCmdLine, int nCmdShow) {
@@ -653,22 +695,30 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 		ID3D11VertexShader *my_vertex_shader = null;
 		ID3D11PixelShader *my_gooch_pixel_shader = null;
 		ID3D11PixelShader *my_test_pixel_shader = null;
+        
+        // https://learn.microsoft.com/en-us/windows/win32/direct3d11/vertex-shader-stage
+        // "The vertex-shader stage must always be active for the pipeline to execute.
+        // If no vertex modification or transformation is required, a pass-through vertex
+        // shader must be created and set to the pipeline."
+        ID3D11VertexShader *downsample_vertex_shader = null;
+        ID3D11PixelShader *downsample_pixel_shader = null;
+        
 		ID3D11InputLayout *per_vertex_input_layout = null;
 		ID3D11Buffer *cube_vertex_buffer = null;
 		ID3D11Buffer *constant_buffer = null;
 		ID3D11Buffer *light_constant_buffer = null;
 		ID3D11Buffer *model_instance_buffer = null;
 		ID3D11ShaderResourceView *model_instance_srv = null;
-         
-			// Vertices <-> Normal
+        
+        // Vertices <-> Normal
 		f32 cube_model_vertices[] = {
 			// FRONT			
 			-0.5f, -0.5f, -0.5f, 	0.0f, 0.0f, -1.0f,
 			-0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
-             0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
+            0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
             
-             0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
-             0.5f, -0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
+            0.5f,  0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
+            0.5f, -0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
 			-0.5f, -0.5f, -0.5f,	0.0f, 0.0f, -1.0f,
             
 			// LEFT
@@ -682,12 +732,12 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             
 			// BACK
             0.5f, -0.5f,  0.5f,		0.0f, 0.0f, 1.0f,
-             0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
+            0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
 			-0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
             
 			-0.5f,  0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
 			-0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
-             0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
+            0.5f, -0.5f,  0.5f,	0.0f, 0.0f, 1.0f,
             
 			// RIGHT
             0.5f, -0.5f, -0.5f,		1.0f, 0.0f, 0.0f,
@@ -736,7 +786,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			if (h_result != S_OK) {
 				ExitProcess(0);
 			}
-
+            
             // Some shading models model light in a binary way. That is, what the object looks like
             // in the presence of light or in the absence of (or unaffected by) light. Thus, we need criteria for
             // distinguishing two cases. That is, distance from light sources, shadowing, surface facing away from light, etc.
@@ -744,7 +794,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             // Mathematically speaking, let g be a function of unlit surface, f be a function of lit surface, n be the surface normal,
             // v be the vector to the eye, l be the vector to the light, and c be the shade result. Then,
             // c = g(n, v) + f(l, n, v).
-    
+            
 			const char hlsl_code[] =
 				"#line " stringify(__LINE__) "\n"
                 "#define LightType_Directional 0\n"
@@ -804,6 +854,8 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				"};\n"
 				"\n"
 				"StructuredBuffer<Model_Per_Instance> model_instances : register(t0);\n"
+                "Texture2D<float4> high_res_texture : register(t1);\n"
+                "SamplerState high_res_sampler : register(s0);\n"
 				"\n"
 				"float4 quat_mul(float4 a, float4 b) {\n"
 				"	float4 result;\n"
@@ -905,7 +957,65 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 "\n" 
 				"	return float4(pow(shaded, 2.2f), vs.colour.w);\n"
                 "}\n"
-
+                "\n"
+                "struct Downsample_VS_Result {\n"
+                "    float4 position : SV_Position;\n"
+                "    float2 uv : UV;\n"
+                "};\n"
+                "Downsample_VS_Result pass_through_vs(uint vertex_id : SV_VertexID) {\n"
+                "    Downsample_VS_Result result = (Downsample_VS_Result)0;\n"
+                "    if (vertex_id == 0) {\n"
+                "        result.position = float4(-1.0f, 1.0f, 0.0f, 1.0f);\n"
+                "        result.uv = float2(0, 0);\n"
+                "    } else if (vertex_id == 1) {\n"
+                "        result.position = float4(1.0f, 1.0f, 0.0f, 1.0f);\n"
+                "        result.uv = float2(1, 0);\n"
+                "    } else if (vertex_id == 2) {\n"
+                "        result.position = float4(-1.0f, -1.0f, 0.0f, 1.0f);\n"
+                "        result.uv = float2(0, 1);\n"
+                "    } else if (vertex_id == 3) {\n"
+                "        result.position = float4(1.0f, -1.0f, 0.0f, 1.0f);\n"
+                "        result.uv = float2(1, 1);\n"
+                "    }\n"
+                "    return (result);\n"
+                "}\n"
+                "\n"
+                "float4 ssaa_ps(Downsample_VS_Result input) : SV_Target {\n"
+                "    uint width, height;"
+                "    high_res_texture.GetDimensions(width, height);\n"
+                "    float2 offset = float2(1.0f / (float)width, 1.0f / (float)height);\n"
+                "    float4 colour0 = high_res_texture.Sample(high_res_sampler, input.uv - offset);\n"
+                "    float4 colour1 = high_res_texture.Sample(high_res_sampler, input.uv + float2(offset.x, -offset.y));\n"
+                "    float4 colour2 = high_res_texture.Sample(high_res_sampler, input.uv + offset);\n"
+                "    float4 colour3 = high_res_texture.Sample(high_res_sampler, input.uv + float2(-offset.x, offset.y));\n"
+                
+                "    float4 colour4 = high_res_texture.Sample(high_res_sampler, input.uv - offset * 2);\n"
+                "    float4 colour5 = high_res_texture.Sample(high_res_sampler, input.uv + 2 * float2(offset.x, -offset.y));\n"
+                "    float4 colour6 = high_res_texture.Sample(high_res_sampler, input.uv + 2 * offset);\n"
+                "    float4 colour7 = high_res_texture.Sample(high_res_sampler, input.uv + 2 * float2(-offset.x, offset.y));\n"
+                
+                "    float4 colour8 = high_res_texture.Sample(high_res_sampler, input.uv - offset * 3);\n"
+                "    float4 colour9 = high_res_texture.Sample(high_res_sampler, input.uv + 3 * float2(offset.x, -offset.y));\n"
+                "    float4 colour10 = high_res_texture.Sample(high_res_sampler, input.uv + 3 * offset);\n"
+                "    float4 colour11 = high_res_texture.Sample(high_res_sampler, input.uv + 3 * float2(-offset.x, offset.y));\n"
+                "    colour0.xyz *= colour0.xyz;\n"
+                "    colour1.xyz *= colour1.xyz;\n"
+                "    colour2.xyz *= colour2.xyz;\n"
+                "    colour3.xyz *= colour3.xyz;\n"
+                
+                "    colour4.xyz *= colour4.xyz;\n"
+                "    colour5.xyz *= colour5.xyz;\n"
+                "    colour6.xyz *= colour6.xyz;\n"
+                "    colour7.xyz *= colour7.xyz;\n"
+                
+                "    colour8.xyz *= colour8.xyz;\n"
+                "    colour9.xyz *= colour9.xyz;\n"
+                "    colour10.xyz *= colour10.xyz;\n"
+                "    colour11.xyz *= colour11.xyz;\n"
+                "    return (colour0 + colour1 + colour2 + colour3 + colour4 + colour5 + colour6 + colour7) * (1.0f / 8.0f);\n"
+                //"    return (colour0 + colour1 + colour2 + colour3 + colour4 + colour5 + colour6 + colour7 + colour8 + colour9 + colour10 + colour11) * (1.0f / 12.0f);\n"
+                //"    return (colour0 + colour1 + colour2 + colour3) * (1.0f / 4.0f);\n"
+                "}\n"
 				;
             
 			OutputDebugStringA(hlsl_code);
@@ -972,7 +1082,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			}
             
 			ID3D10Blob_Release(d3d_bytecode);
-
+            
             h_result = D3DCompile(hlsl_code, sizeof(hlsl_code), null, null,
 								  D3D_COMPILE_STANDARD_FILE_INCLUDE, "ps_test_shading_model", "ps_5_0",
 								  D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION |
@@ -984,9 +1094,58 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				os_message_box(str8("Pixel Shader Compilation Error"), str8_make(ID3D10Blob_GetBufferPointer(d3d_error), ID3D10Blob_GetBufferSize(d3d_error)));
 				ExitProcess(1);
 			}
-
+            
             h_result = ID3D11Device1_CreatePixelShader(d3d11_state.main_device, ID3D10Blob_GetBufferPointer(d3d_bytecode),
 													   ID3D10Blob_GetBufferSize(d3d_bytecode), null, &my_test_pixel_shader);
+            
+			if (h_result != S_OK) {
+				os_message_box(str8("Error"), str8("Failed to create Pixel Shader"));
+				ExitProcess(1);
+			}
+            
+			ID3D10Blob_Release(d3d_bytecode);
+            
+            // downsampling shaders
+            h_result = D3DCompile(hlsl_code, sizeof(hlsl_code), null, null,
+								  D3D_COMPILE_STANDARD_FILE_INCLUDE, "pass_through_vs", "vs_5_0",
+								  D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION |
+								  D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS |
+								  D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+								  &d3d_bytecode, &d3d_error);
+            
+			if (h_result != S_OK) {
+				os_message_box(str8("Vertex Shader Compilation Error"),
+							   str8_make(ID3D10Blob_GetBufferPointer(d3d_error),
+                                         ID3D10Blob_GetBufferSize(d3d_error)));
+				ExitProcess(1);
+			}
+            
+			h_result = ID3D11Device1_CreateVertexShader(d3d11_state.main_device, ID3D10Blob_GetBufferPointer(d3d_bytecode),
+														ID3D10Blob_GetBufferSize(d3d_bytecode), null, &downsample_vertex_shader);
+            
+			if (h_result != S_OK) {
+				os_message_box(str8("Error"), str8("Failed to create Vertex Shader"));
+				ExitProcess(1);
+			}
+            
+            
+			ID3D10Blob_Release(d3d_bytecode);
+            
+            h_result = D3DCompile(hlsl_code, sizeof(hlsl_code), null, null,
+								  D3D_COMPILE_STANDARD_FILE_INCLUDE, "ssaa_ps", "ps_5_0",
+								  D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION |
+								  D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR | D3DCOMPILE_ENABLE_STRICTNESS |
+								  D3DCOMPILE_WARNINGS_ARE_ERRORS, 0,
+								  &d3d_bytecode, &d3d_error);
+            
+			if (h_result != S_OK) {
+				os_message_box(str8("Pixel Shader Compilation Error"), str8_make(ID3D10Blob_GetBufferPointer(d3d_error), ID3D10Blob_GetBufferSize(d3d_error)));
+				ExitProcess(1);
+			}
+            
+            h_result = ID3D11Device1_CreatePixelShader(d3d11_state.main_device, ID3D10Blob_GetBufferPointer(d3d_bytecode),
+													   ID3D10Blob_GetBufferSize(d3d_bytecode), null, &downsample_pixel_shader);
+            
             
 			if (h_result != S_OK) {
 				os_message_box(str8("Error"), str8("Failed to create Pixel Shader"));
@@ -1042,7 +1201,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				os_message_box(str8("Error"), str8("Failed to create Constant Buffer"));
 				ExitProcess(1);
 			}
-
+            
             //
             constant_desc.ByteWidth = sizeof(Light_Constants);
 			constant_desc.Usage = D3D11_USAGE_DYNAMIC;
@@ -1051,13 +1210,13 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			h_result = ID3D11Device1_CreateBuffer(d3d11_state.main_device,
                                                   &constant_desc, null,
                                                   &light_constant_buffer);
-    
+            
 			if (h_result != S_OK) {
 				os_message_box(str8("Error"), str8("Failed to create Constant Buffer"));
 				ExitProcess(1);
 			}
 		}
-       
+        
 		// Ok, so rotations in R^3 (esp. camera)
 		// We discuss Euler Angles, namely, pitch, yaw, and roll.
 		// Euler angles are a mechanism for creating a rotation through a sequence
@@ -1081,7 +1240,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 		v3f camera_p = v3f_make(0.0f, 0.0f, 0.0f);
 		f32 camera_theta = 90.0f; // nod yes; Rotate around x.
 		f32 camera_phi = 90.0f; // no; rotate around y
-	
+        
 		{
 			POINT new_cursor;
 			new_cursor.x = os_window.client_width / 2;
@@ -1089,16 +1248,18 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			ClientToScreen(os_window.handle, &new_cursor);
 			SetCursorPos(new_cursor.x, new_cursor.y);
 		}
-
+        
+        
+        ID3D11ShaderResourceView* null_srv = null;
         f32 game_dt_step = 1.0f / 60.0f;
 		f32 rot_accum = 0.0f;
 		while (!(os_input.flags & OSInput_Flag_Quit)) {
 			os_fill_events(&os_input, &os_window);
-
+            
 			if (os_input_released(&os_input, OSInput_Key_Escape)) {
 				os_input.flags |= OSInput_Flag_Quit;
 			}
-
+            
 			f32 mouse_sensitivity = 0.1f;
 			camera_theta += os_input.mouse_displace_y * mouse_sensitivity;
 			camera_phi -= os_input.mouse_displace_x * mouse_sensitivity;
@@ -1108,32 +1269,32 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			} else if (camera_theta < 45.0f) {
 				camera_theta = 45.0f;
 			}
-
+            
 			if (camera_phi >= 360.0f) {
 				camera_phi = 0.0f;
 			} else if (camera_phi <= -360.0f) {
 				camera_phi = 0.0f;
 			}
-
+            
 			f32 theta = radians(camera_theta);
 			f32 phi = radians(camera_phi);
 			f32 cosine_theta = cosf(theta);
 			f32 cosine_phi = cosf(phi);
 			f32 sine_theta = sinf(theta);
 			f32 sine_phi = sinf(phi);
-
+            
 			v3f camera_forward;
 			camera_forward.x = cosine_phi * sine_theta;
 			camera_forward.y = cosine_theta;
 			camera_forward.z = sine_theta * sine_phi;
 			v3f_norm(&camera_forward);
-
+            
 			v3f temp_up = v3f_make(0.0f, 1.0f, 0.0f);
 			v3f camera_right = v3f_cross(temp_up, camera_forward);
 			v3f_norm(&camera_right);
 			v3f camera_up = v3f_cross(camera_forward, camera_right);
 			v3f_norm(&camera_up);
-
+            
 			f32 move_speed = 0.1f;
 			if (os_input_held(&os_input, OSInput_Key_W)) {
 				camera_p = v3f_add(v3f_scale(camera_forward, move_speed), camera_p);
@@ -1150,7 +1311,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			if (os_input_held(&os_input, OSInput_Key_D)) {
 				camera_p = v3f_add(camera_p, v3f_scale(camera_right, move_speed));
 			}
-
+            
 			if (os_input_held(&os_input, OSInput_Key_Shift)) {
 				camera_p = v3f_sub(camera_p, v3f_scale(camera_up, move_speed));
 			}
@@ -1158,10 +1319,10 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			if (os_input_held(&os_input, OSInput_Key_Space)) {
 				camera_p = v3f_add(camera_p, v3f_scale(camera_up, move_speed));
 			}
-
+            
 			D3D11_VIEWPORT viewport;
-			viewport.Width = (f32)os_window.client_width;
-			viewport.Height = (f32)os_window.client_height;
+			viewport.Width = (f32)os_window.client_width * 2;
+			viewport.Height = (f32)os_window.client_height * 2;
 			viewport.MinDepth = 0;
 			viewport.MaxDepth = 1;
 			viewport.TopLeftX = 0;
@@ -1179,18 +1340,18 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             //quat x = quat_make_rotate_around_axis(rot_accum, v3f_make(1.0f, 0.0f, 0.0f));
             //quat y = quat_make_rotate_around_axis(rot_accum * 2.0f, v3f_make(0.0f, 1.0f, 0.0f));
             //quat z = quat_make_rotate_around_axis(-rot_accum * 0.5f, v3f_make(0.0f, 0.0f, 1.0f));
-
+            
 			rot_accum += game_dt_step;
             
 			D3D11_MAPPED_SUBRESOURCE mapped_subresource;
 			switch (ID3D11DeviceContext_Map(d3d11_state.base_device_context,
-                                                    (ID3D11Resource *)constant_buffer, 0, D3D11_MAP_WRITE_DISCARD,
-                                                    0, &mapped_subresource)) {
+                                            (ID3D11Resource *)constant_buffer, 0, D3D11_MAP_WRITE_DISCARD,
+                                            0, &mapped_subresource)) {
 				case S_OK: {
 					f32 aspect = viewport.Height / viewport.Width;
                     m44 pers = m44_perspective_lh_z01(radians(66.2f), aspect, 1.0f, 100.0f);
                     D3D11_Constants *constants = ((D3D11_Constants *)mapped_subresource.pData);
-
+                    
 					constants->perspective = pers;
 					constants->world_to_camera.rows[0] = v4f_make(camera_right.x, camera_up.x, camera_forward.x, 0.0f);
 					constants->world_to_camera.rows[1] = v4f_make(camera_right.y, camera_up.y, camera_forward.y, 0.0f);
@@ -1203,14 +1364,14 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)constant_buffer, 0);
 				} break;
 			}
-
+            
             switch (ID3D11DeviceContext_Map(d3d11_state.base_device_context,
                                             (ID3D11Resource *)light_constant_buffer, 0, D3D11_MAP_WRITE_DISCARD,
                                             0, &mapped_subresource)) {
                 case S_OK: {
                     v3f size = v3f_make(0.2f, 0.2f, 0.2f);
                     v4f colour = v4f_make(1.0f, 1.0f, 1.0f, 1.0f);
-
+                    
                     Light_Constants *constants = (Light_Constants *)mapped_subresource.pData;
                     Light light;
                     light.type = LightType_Spotlight;
@@ -1225,7 +1386,7 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     light.enabled = True;
                     constants->light[0] = light;
                     r3d_add_instance(&r3d_buffer, light.p, quat_identity(), size, colour);
-
+                    
                     light.p = v3f_make(16.0f, 4.0f, -4.0f);
                     light.reference_distance = 24.0f;
                     light.max_distance = 100.0f;
@@ -1233,14 +1394,14 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     light.colour = v4f_make(1.0f, 1.0f, 1.0f, 1.0f);
                     constants->light[1] = light;
                     r3d_add_instance(&r3d_buffer, light.p, quat_identity(), size, colour);
-
+                    
                     light.type = LightType_Point;
                     light.p = v3f_make(sinf(rot_accum) * 10.0f, cosf(rot_accum) * 10.0f, 0.0f);
                     light.reference_distance = 16.0f;
                     light.max_distance = 100.0f;
                     light.colour = v4f_make(0.0f, 1.0f, 0.0f, 1.0f);
                     constants->light[2] = light;
-
+                    
                     r3d_add_instance(&r3d_buffer, light.p, quat_identity(), size, colour);
                     constants->camera_p = camera_p;
 					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)light_constant_buffer, 0);
@@ -1255,11 +1416,14 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 					ID3D11DeviceContext_Unmap(d3d11_state.base_device_context, (ID3D11Resource *)model_instance_buffer, 0);
 				} break;
 			}
-            
+            // render scene
+            D3D11_TEXTURE2D_DESC backbuffer_desc = { 0 };
 			f32 colour[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 			ID3D11DeviceContext_ClearRenderTargetView(d3d11_state.base_device_context,
 													  d3d11_state.offscreen_back_buffer_rtv,
+                                                      //d3d11_state.back_buffer_as_rtv,
 													  colour);
+            
 			ID3D11DeviceContext_ClearDepthStencilView(d3d11_state.base_device_context,
 													  d3d11_state.depth_buffer_view,
 													  D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -1284,13 +1448,17 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 			ID3D11DeviceContext_VSSetConstantBuffers(d3d11_state.base_device_context,
 													 0, 1, &constant_buffer);
             
+            
+            ID3D11Texture2D_GetDesc(d3d11_state.offscreen_back_buffer, &backbuffer_desc);
+            viewport.Width = (FLOAT)backbuffer_desc.Width;
+			viewport.Height = (FLOAT)backbuffer_desc.Height;
 			ID3D11DeviceContext_RSSetViewports(d3d11_state.base_device_context, 1, &viewport);
 			ID3D11DeviceContext_RSSetState(d3d11_state.base_device_context,
 										   (ID3D11RasterizerState *)d3d11_state.fill_cull_raster);
             
             ID3D11DeviceContext_PSSetConstantBuffers(d3d11_state.base_device_context,
                                                      1, 1, &light_constant_buffer);
-
+            
 			ID3D11DeviceContext_PSSetShader(d3d11_state.base_device_context,
 											my_test_pixel_shader,
 											null, 0);
@@ -1300,25 +1468,61 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             
 			ID3D11DeviceContext_OMSetRenderTargets(d3d11_state.base_device_context, 1,
 												   &(d3d11_state.offscreen_back_buffer_rtv),
+                                                   //&d3d11_state.back_buffer_as_rtv,
 												   d3d11_state.depth_buffer_view);
             
 			ID3D11DeviceContext_OMSetBlendState(d3d11_state.base_device_context,
 											    null, null, 0xffffffff);
-
+            
 			ID3D11DeviceContext_DrawInstanced(d3d11_state.base_device_context,
 											  36, (UINT)r3d_buffer.count, 0, 0);
-
-
+            
+            ID3D11DeviceContext_OMSetRenderTargets(d3d11_state.base_device_context, 0, null, null);
+            
+            // SSAA pass
+			ID3D11DeviceContext_VSSetShader(d3d11_state.base_device_context,
+											downsample_vertex_shader,
+											null, 0);
+            
+			ID3D11DeviceContext_PSSetShader(d3d11_state.base_device_context,
+											downsample_pixel_shader,
+											null, 0);
+            
+            ID3D11DeviceContext_PSSetShaderResources(d3d11_state.base_device_context, 1, 1, 
+                                                     &d3d11_state.offscreen_back_buffer_srv);
+            
+            ID3D11DeviceContext_PSSetSamplers(d3d11_state.base_device_context, 0, 1,
+                                              &d3d11_state.sampler_for_high_res_buffer);
+            ID3D11DeviceContext_RSSetViewports(d3d11_state.base_device_context, 1, &viewport);
+            
+            ID3D11Texture2D_GetDesc(d3d11_state.back_buffer, &backbuffer_desc);
+            viewport.Width = (FLOAT)backbuffer_desc.Width;
+			viewport.Height = (FLOAT)backbuffer_desc.Height;
+            ID3D11DeviceContext_RSSetViewports(d3d11_state.base_device_context, 1, &viewport);
+            
+			ID3D11DeviceContext_OMSetDepthStencilState(d3d11_state.base_device_context, null, 0);
+            ID3D11DeviceContext_OMSetRenderTargets(d3d11_state.base_device_context, 1,
+                                                   &d3d11_state.back_buffer_as_rtv,
+												   null);
+            
+			ID3D11DeviceContext_IASetPrimitiveTopology(d3d11_state.base_device_context,
+                                                       D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            
+            ID3D11DeviceContext_Draw(d3d11_state.base_device_context, 4, 0);
+            
+            ID3D11DeviceContext_PSSetShaderResources(d3d11_state.base_device_context, 1, 1, 
+                                                     &null_srv);
+#if 0
             D3D11_TEXTURE2D_DESC backbuffer_desc = { 0 };
             ID3D11Texture2D_GetDesc(d3d11_state.back_buffer, &backbuffer_desc);
             ID3D11DeviceContext_ResolveSubresource(d3d11_state.base_device_context, (ID3D11Resource *)d3d11_state.back_buffer, 0,
                                                    (ID3D11Resource *)d3d11_state.offscreen_back_buffer, 0, 
                                                    backbuffer_desc.Format);
-            
+#endif
 			IDXGISwapChain1_Present(d3d11_state.swap_chain, 1, 0);
 			r3d_buffer.count = 0;
 		}
 	}
-
+    
 	ExitProcess(0);
 }
